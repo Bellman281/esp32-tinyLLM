@@ -1,0 +1,30 @@
+[package]
+name = "llm_host"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Host-side CLI + correctness/perplexity harness -- the Rust replacement for
+# the C project's hand-compiled ("cc -O3 ...") host tools. Ports:
+#   reference-c/esp32-llm-lab/gen_prompt.c      -> src/bin/gen_prompt.rs
+#   reference-c/esp32-llm-lab/host_generate.c   -> src/bin/host_generate.rs
+#   reference-c/firmware/host_verify/verify.c   -> tests/golden.rs
+#   reference-c/firmware/host_verify/ppl.c      -> src/bin/ppl.rs
+
+[[bin]]
+name = "gen-prompt"
+path = "src/bin/gen_prompt.rs"
+
+[[bin]]
+name = "host-generate"
+path = "src/bin/host_generate.rs"
+
+[[bin]]
+name = "ppl"
+path = "src/bin/ppl.rs"
+
+[dependencies]
+llm_core = { path = "../llm-core" }
+
+[features]
+int8-activations = ["llm_core/int8-activations"]

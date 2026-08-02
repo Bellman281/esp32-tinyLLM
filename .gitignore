@@ -1,0 +1,13 @@
+# Rust build artifacts
+target/
+
+# Local scratch / cleanup staging (not part of the tracked project)
+engine/_to_delete/
+
+# Xtensa/ESP-IDF template output (esp32-rust/) is its own separate,
+# not-yet-folded-in project -- deliberately not tracked here until it's
+# merged into engine/llm-firmware/ per MIGRATION_PLAN.md.
+esp32-rust/
+
+# ESP-IDF build tooling, if generated locally
+.embuild/

@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = [
+    "llm-core",
+    "llm-host",
+    # "llm-firmware", # TODO: uncomment at Phase 3 (needs the ESP32-S3 Rust
+                       # toolchain installed first — see llm-firmware/README.md)
+    # "llm-display",  # TODO: uncomment at Phase 4 (optional, deferred)
+]
+
+# Workspace-wide release profile will be tuned here once we're benchmarking
+# the Rust build against the numbers already recorded in
+# reference-c/firmware/esp32_llm/README.md (102.9ms/step, 9.72 tok/s).
