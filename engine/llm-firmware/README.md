@@ -7,19 +7,41 @@ already-verified, platform-independent inference engine) plus
 flash partition mmap, PSRAM allocation, and the dual-core int8-staged output
 head.
 
-## Status: written, host-logic-checked, **not yet built for the target**
+## Status: **builds clean against the real Xtensa/ESP-IDF toolchain**
 
-This crate cannot be compiled or run in any environment available to whoever
-(human or Claude) is writing this from the cloud sandbox side: the
-Xtensa/ESP-IDF toolchain isn't installable there (no access to the
-GitHub-hosted release assets `espup` needs), and there's no other execution
-environment with `cargo`/`rustc` at all, let alone the ESP-IDF C SDK. **Only a
-machine with `espup`/ESP-IDF actually installed — confirmed working on this
-project's own dev machine, where the `esp-idf-template` skeleton already
-built successfully — can compile-check this crate.**
+`cargo build` (dev profile) succeeds on the project's own dev machine (the
+only place with `espup`/ESP-IDF actually installed — this can't be compiled
+anywhere the cloud-sandbox/Claude side of this project has execution access,
+see below). Every FFI guess this port made — the bindgen-mangled partition
+enum constants, `esp_idf_hal::task`'s API, the `sdkconfig.defaults` keys —
+turned out correct on the first real attempt, after fixing two
+build-plumbing issues that had nothing to do with the ported logic itself:
 
-Given that constraint, this code was written and checked as rigorously as
-possible without a target build:
+1. `llm-firmware` needed an empty `[workspace]` table in its own `Cargo.toml`
+   to opt out of `engine/Cargo.toml`'s workspace (Cargo doesn't auto-detect
+   "not a member" from a parent directory).
+2. `CONFIG_PARTITION_TABLE_CUSTOM`/`_FILENAME` in `sdkconfig.defaults` don't
+   work with `esp-idf-sys`'s build (a known, documented limitation --
+   [esp-rs/esp-idf-sys#395](https://github.com/esp-rs/esp-idf-sys/issues/395)):
+   its synthetic CMake project resolves a custom partition table's filename
+   against its own `OUT_DIR`, not the crate root, so a relative path can
+   never be found there. Fix: don't set those keys at all; pass the real
+   table at flash time instead (`.cargo/config.toml`'s `runner` now does
+   `espflash flash --partition-table partitions.csv --monitor`).
+
+**Not yet done:** a release-profile build (`cargo build --release` — the
+profile the ms/token measurement in `main.rs` actually depends on), and
+anything involving real hardware (no board is attached to this project yet
+-- see "What's next" below).
+
+Before those two fixes, this crate couldn't be compiled or run in any
+environment available to whoever (human or Claude) was writing the original
+port from the cloud sandbox side: the Xtensa/ESP-IDF toolchain isn't
+installable there (no access to the GitHub-hosted release assets `espup`
+needs), and there's no other execution environment with `cargo`/`rustc` at
+all, let alone the ESP-IDF C SDK. Given that constraint, the original port
+was written and checked as rigorously as possible without a target build,
+before ever reaching a real compiler:
 
 - Every module's tensor/numerics logic reuses functions `llm-host`'s
   existing test suite already verified bit-for-bit against the C reference
@@ -45,41 +67,23 @@ possible without a target build:
   naming the specific risk and what to trust instead (ESP-IDF's own
   generated bindings, always) if the guess is wrong.
 
-### What to do with a real build
+### What's next
 
-Run `cargo build` from this directory on a machine with `espup`/ESP-IDF
-installed (same setup already confirmed working for the
-`esp-idf-template` skeleton earlier in this project). Report back whichever
-of these happens:
+1. `cargo build --release` from this directory — same code, the profile
+   that actually matters for the tok/s comparison (`opt-level = 3`, matching
+   the C reference's `-O3`). Should also build clean; if it doesn't, that's
+   new information the dev-profile build didn't surface.
+2. Once there's an ESP32-S3 board to flash (none is attached to this
+   project yet): `cargo run` (or `espflash flash --partition-table
+   partitions.csv --monitor` directly) against a board with the `model`
+   partition programmed, then compare boot diagnostics + measured tok/s
+   against `reference-c/firmware/esp32_llm/README.md`'s numbers (102.9
+   ms/step, 9.72 tok/s compute-only) — should match within noise. This is
+   the real exit gate for Phase 3; everything above it is necessary but not
+   sufficient.
 
-1. **It builds clean.** Flash it (`cargo run`, or `espflash flash --monitor`)
-   against a real ESP32-S3 with the `model` partition programmed, compare
-   boot diagnostics + measured tok/s against
-   `reference-c/firmware/esp32_llm/README.md`'s numbers (102.9 ms/step,
-   9.72 tok/s compute-only) — should match within noise.
-2. **It fails to build.** The error message is the actual authority on
-   whatever this port guessed wrong — most likely candidates, ranked by
-   estimated risk:
-   - `partition.rs`: the bindgen-mangled spelling of
-     `ESP_PARTITION_TYPE_DATA`/`ESP_PARTITION_MMAP_DATA` (guessed as
-     `esp_partition_type_t_ESP_PARTITION_TYPE_DATA` /
-     `esp_partition_mmap_memory_t_ESP_PARTITION_MMAP_DATA`).
-   - `head.rs`/`psram.rs`: `esp_idf_hal::task`'s exact API (`create`,
-     `current`, `notify`, `wait_notification`) and `esp_idf_hal::cpu::Core`
-     — researched from esp-idf-hal's own source, not from a build, so the
-     types/argument order should be right but the exact module path or a
-     since-changed signature is possible.
-   - `sdkconfig.defaults`: any `CONFIG_*` key ESP-IDF's `menuconfig`
-     doesn't recognize (PSRAM octal mode, flash size, custom partition
-     table, CPU freq — see that file's own comments for what each guess is
-     based on).
-   Fix the specific line the compiler points at, using ESP-IDF's own
-   generated bindings/headers as ground truth; everything else in the
-   file was written to need no other changes.
-
-Either way, report back (build log, or the diagnostics/tok-s output) before
-Phase 4 (`llm-display`) starts — this crate is the foundation the display
-work builds on, so it's worth confirming solid first.
+Only after hardware confirms working should Phase 4 (`llm-display`) start —
+it builds directly on this crate.
 
 ## What's ported here (and what isn't yet)
 

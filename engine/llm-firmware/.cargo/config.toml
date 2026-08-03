@@ -3,7 +3,13 @@ target = "xtensa-esp32s3-espidf"
 
 [target.'cfg(target_os = "espidf")']
 linker = "ldproxy"
-runner = "espflash flash --monitor"
+# --partition-table is required here (not just at CMake-config time) because
+# sdkconfig.defaults deliberately does NOT set CONFIG_PARTITION_TABLE_CUSTOM*
+# -- see that file's comment for why (esp-rs/esp-idf-sys#395: a relative
+# custom partition table filename there fails the CMake build entirely).
+# This is the documented workaround: point espflash at the real table
+# directly when flashing, instead of trying to bake it into the CMake build.
+runner = "espflash flash --partition-table partitions.csv --monitor"
 rustflags = [ "--cfg",  "espidf_time64"]
 
 [unstable]

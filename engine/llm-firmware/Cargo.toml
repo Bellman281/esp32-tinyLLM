@@ -6,6 +6,17 @@ edition = "2021"
 resolver = "2"
 rust-version = "1.82"
 
+# Empty [workspace] table: this is Cargo's own mechanism for "this package
+# is not a member of any ancestor workspace, stop looking" -- without it,
+# `cargo build` here fails outright (`current package believes it's in a
+# workspace when it's not`), because Cargo walks up to engine/Cargo.toml's
+# `[workspace]` table and finds this package listed in neither `members`
+# nor `exclude`. Deliberately NOT added to engine/Cargo.toml's `members`
+# instead (even though that file's comment suggested doing exactly that) --
+# see .cargo/config.toml's comment on why a std-host workspace and an
+# Xtensa/espidf cross target don't mix well in one `cargo build`.
+[workspace]
+
 [[bin]]
 name = "llm-firmware"
 harness = false # do not use the built-in cargo test harness -> resolve rust-analyzer errors

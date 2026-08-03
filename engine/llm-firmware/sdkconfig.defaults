@@ -36,10 +36,20 @@ CONFIG_SPIRAM_IGNORE_NOTFOUND=n
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 
-# Custom partition table (nvs/factory/model/coredump) -- see partitions.csv
-# in this directory, copied verbatim from reference-c/firmware/esp32_llm/.
-CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+# ---- NOT set here on purpose: CONFIG_PARTITION_TABLE_CUSTOM /
+# ---- CONFIG_PARTITION_TABLE_CUSTOM_FILENAME. This file's own custom
+# ---- partition table -- nvs/factory/model/coredump -- still lives at
+# ---- ./partitions.csv in this directory (copied verbatim from
+# ---- reference-c/firmware/esp32_llm/), but esp-idf-sys's CMake build
+# ---- resolves CONFIG_PARTITION_TABLE_CUSTOM_FILENAME against its own
+# ---- synthetic OUT_DIR project, not this crate root, so a relative
+# ---- filename here fails with a ninja error ("no known rule to make
+# ---- .../out/partitions.csv") -- a known, already-documented esp-idf-sys
+# ---- limitation (esp-rs/esp-idf-sys#395; see the README's "Known
+# ---- limitations" section). Its own documented fix is exactly this: leave
+# ---- these two keys unset, and pass the table at flash time instead --
+# ---- see .cargo/config.toml's `runner`, which now does
+# ---- `espflash flash --partition-table partitions.csv --monitor`.
 
 # 240MHz CPU (matches CPUFreq=240 in the Arduino build -- the C reference's
 # 102.9ms/step number was measured at this clock).
