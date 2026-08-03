@@ -56,13 +56,24 @@ CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
 
-# ---- NOT set here on purpose: console-over-USB routing. The Arduino build
-# ---- used USBMode=hwcdc,CDCOnBoot=cdc (native USB-CDC as the `Serial`
-# ---- port); this file deliberately does NOT guess the ESP-IDF std-app
-# ---- equivalent (something in the CONFIG_ESP_CONSOLE_* family -- the
-# ---- exact key differs by whether the board's console is native USB-CDC
-# ---- vs USB-Serial-JTAG vs a plain UART, and guessing wrong here just
-# ---- means boot prints don't show up on the expected port, not a build
-# ---- failure). If `cargo run`'s serial monitor shows nothing, check
-# ---- `idf.py menuconfig` -> "Component config -> ESP System Settings ->
-# ---- Channel for console output" for the right key and add it here.
+# ---- Console routing: REVERTED. Tried forcing CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+# ---- as primary (theory: the board's /dev/cu.usbmodem* port is the chip's native
+# ---- USB-Serial-JTAG peripheral, and secondary consoles are output-only, so stdin
+# ---- could never arrive while USB was demoted to secondary). On real hardware this
+# ---- reproducibly hung at boot right after "cpu_start: Multicore app", both after a
+# ---- soft (DTR) reset and after a full physical power cycle -- consistent with this
+# ---- board actually wiring its USB connector to an EXTERNAL bridge chip sitting on
+# ---- the UART0 pins (GPIO43/44) rather than to the chip's native USB D+/D- pins, in
+# ---- which case USB-Serial-JTAG-as-primary points the console at a peripheral with
+# ---- nothing physically attached, and it blocks forever waiting for a USB host that
+# ---- can never appear there. Reverted to ESP-IDF's own default (UART primary, USB
+# ---- Serial/JTAG secondary) rather than keep guessing at wiring; see main.rs's
+# ---- read_prompt_ids() for the actual fix, which doesn't touch console routing at
+# ---- all -- esp-rs/esp-idf-hal#200 documents std::io::stdin() itself being broken
+# ---- for blocking reads on ESP-IDF, regardless of which channel is primary, with
+# ---- a raw libc::read(STDIN_FILENO, ...) call as the confirmed workaround.
+# ----
+# ---- (Original comment, still accurate: the Arduino build used USBMode=hwcdc,
+# ---- CDCOnBoot=cdc -- if `cargo run`'s serial monitor ever shows nothing at all,
+# ---- check `idf.py menuconfig` -> "Component config -> ESP System Settings ->
+# ---- Channel for console output" before re-guessing a CONFIG_ESP_CONSOLE_* key here.)

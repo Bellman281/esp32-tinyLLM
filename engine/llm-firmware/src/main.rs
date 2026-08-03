@@ -27,15 +27,129 @@ mod psram;
 mod vocab;
 
 use esp_idf_svc::hal::sys::esp_timer_get_time;
-use llm_core::{llm_forward_with_head_override, Model};
+use llm_core::{llm_forward_profiled, llm_forward_with_head_override, Model, Profile};
 use std::io::Write;
 use std::time::Duration;
 
-/// "Once upon a time" -- matches `esp32_llm.ino`'s `PROMPT_IDS` exactly
-/// (cross-checked against the embedded vocab table in `vocab.rs`'s doc
-/// comment: token 433 decodes to "Once", 447 to " upon", etc).
-const PROMPT_IDS: [usize; 4] = [433, 447, 259, 405];
+/// "Once upon a time" -- matches `esp32_llm.ino`'s hardcoded `PROMPT_IDS`
+/// exactly (cross-checked against the embedded vocab table in `vocab.rs`'s
+/// doc comment: token 433 decodes to "Once", 447 to " upon", etc). Now only
+/// the *fallback* prompt (see `read_prompt_ids`'s doc comment) -- the C
+/// reference has no runtime input path at all, so this is a deliberate
+/// deviation, not a port of anything in `esp32_llm.ino`.
+const DEFAULT_PROMPT_IDS: [usize; 4] = [433, 447, 259, 405];
 const N_GENERATE: usize = 200;
+
+/// Reads one line of comma-separated token IDs from stdin (wired to the
+/// USB-CDC console by ESP-IDF's std-app console VFS driver -- the same
+/// mechanism that already makes `println!`/`print!` reach the serial
+/// monitor, just the read direction, which nothing in this project has
+/// exercised before this).
+///
+/// Companion piece: `esp32-ai/esp32-llm-lab/chat_device.py`, a new script
+/// living next to (not replacing) `chat.py` -- it reuses `chat.py`'s own
+/// `encode()` untouched (per MIGRATION_PLAN.md, that tokenizer stays
+/// Python-side, off-chip) and sends its output here instead of piping it
+/// into a host-compiled `gen_prompt` the way `chat.py` itself does.
+///
+/// VERIFICATION STATUS UPDATE (first on-hardware runs): originally built on
+/// `std::io::stdin().read_line()`, polled in a loop (a single blocking call
+/// returned instantly empty, matching how this whole ecosystem generally
+/// does serial I/O -- the C reference's own `emit()` checks
+/// `Serial.availableForWrite()` rather than blocking). That polling loop
+/// ran cleanly -- no errors, no panics -- but never once received a byte,
+/// even after 20s with `chat_device.py` writing within milliseconds of
+/// `READY`. Two theories were tested in order:
+///
+/// 1. Console routing: ESP-IDF's stdio guide says a *secondary* console is
+///    output-only ("stdin will only contain data sent by the host to the
+///    *primary* console"), and this board's generated sdkconfig had UART0
+///    primary / USB-Serial-JTAG secondary -- exactly backwards from the
+///    `/dev/cu.usbmodem*` port actually in use. Forcing
+///    `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y` as primary (see
+///    `sdkconfig.defaults`) reproducibly hung at boot instead (right after
+///    `cpu_start: Multicore app`, both after a soft DTR reset and a full
+///    power cycle) -- consistent with this board's USB connector actually
+///    being wired to an external bridge chip on the UART0 pins rather than
+///    to the chip's native USB D+/D- pins, so USB-Serial-JTAG-as-primary
+///    pointed the console at a peripheral nothing is attached to. Reverted.
+/// 2. `std::io::Stdin` itself: esp-rs/esp-idf-hal#200 documents this
+///    directly -- Rust's std stdin implementation is not correctly wired
+///    for ESP-IDF's console VFS regardless of which channel is primary
+///    ("Rust's std does not allow it... not implemented there for esp"),
+///    and its documented workaround is a raw `read(2)` on fd 0 via `libc`
+///    instead of going through `std::io::Stdin` at all. That's what this
+///    function does now. Still not yet confirmed on hardware -- if this
+///    also receives nothing, the next place to look is whether the UART
+///    driver needs an explicit `uart_driver_install`/interrupt-mode call
+///    that ESP-IDF's std-app skeleton doesn't make automatically.
+///
+/// Falls back to `DEFAULT_PROMPT_IDS` once the wait budget is exhausted
+/// with nothing usable received, so a bare reset with no companion script
+/// attached still behaves exactly like every previous run of this
+/// firmware -- it just now takes up to `WAIT_BUDGET` to get there instead
+/// of returning immediately.
+fn read_prompt_ids() -> std::vec::Vec<usize> {
+    const WAIT_BUDGET: Duration = Duration::from_secs(20);
+    const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+    println!("READY (send comma-separated token ids, or blank for the default prompt)");
+    let _ = std::io::stdout().flush();
+
+    // Bypass std::io::stdin() entirely -- see the doc comment above
+    // (esp-rs/esp-idf-hal#200). `read(2)` straight on fd 0 via `libc`,
+    // accumulating bytes ourselves until we see a '\n'.
+    let mut read_buf = [0u8; 256];
+    let mut line: std::vec::Vec<u8> = std::vec::Vec::new();
+    let deadline = std::time::Instant::now() + WAIT_BUDGET;
+    loop {
+        // SAFETY: `read_buf` is a valid, correctly-sized stack buffer that
+        // outlives this call; this is a direct, single read(2) syscall with
+        // the standard libc contract (returns bytes read, 0 at EOF, -1 with
+        // errno set on error/would-block).
+        let n = unsafe {
+            libc::read(
+                libc::STDIN_FILENO,
+                read_buf.as_mut_ptr() as *mut libc::c_void,
+                read_buf.len(),
+            )
+        };
+        if n > 0 {
+            line.extend_from_slice(&read_buf[..n as usize]);
+            if let Some(nl_pos) = line.iter().position(|&b| b == b'\n') {
+                let trimmed = std::str::from_utf8(&line[..nl_pos])
+                    .unwrap_or("")
+                    .trim();
+                if !trimmed.is_empty() {
+                    let ids: std::vec::Vec<usize> = trimmed
+                        .split(',')
+                        .filter_map(|s| s.trim().parse::<usize>().ok())
+                        .collect();
+                    if !ids.is_empty() {
+                        return ids;
+                    }
+                    log::warn!("got a line, none parsed as token ids: {trimmed:?}");
+                }
+                line.clear();
+            }
+        } else if n < 0 {
+            // Use std's own errno decoding (matches what read_line() used to
+            // report) rather than poking libc's errno accessor ourselves --
+            // WouldBlock/EAGAIN means "nothing arrived yet, ask again", any
+            // other kind is unexpected and worth logging.
+            let err = std::io::Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::WouldBlock {
+                log::warn!("stdin read error (still polling): {err:?}");
+            }
+        }
+        // n == 0: nothing this attempt -- keep polling.
+        if std::time::Instant::now() >= deadline {
+            log::warn!("no usable prompt within {WAIT_BUDGET:?}, using default");
+            return DEFAULT_PROMPT_IDS.to_vec();
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
 
 fn main() {
     // Standard esp-idf-svc std-app boilerplate (matches the confirmed-
@@ -103,29 +217,39 @@ fn main() {
     // field.
     let mut head_matvec = |x: &[f32], y: &mut [f32]| head.matvec(x, y);
 
+    let prompt_ids = read_prompt_ids();
+
     print!(">>> ");
     let _ = std::io::stdout().flush();
     let mut pos = 0usize;
     let mut tok = 0usize;
 
-    for &t in PROMPT_IDS.iter() {
+    for &t in prompt_ids.iter() {
         tok = t;
         emit(tok);
         llm_forward_with_head_override(&model, tok, pos, &mut scratch, &mut head_matvec);
         pos += 1;
+        // The C reference doesn't feed the watchdog here either (see
+        // esp32_llm.ino's own prompt-priming loop) -- fine there, because on
+        // real hardware 4 forward passes finish in well under a second. This
+        // port's first on-hardware run tripped the 5s task watchdog multiple
+        // times just during these 4 iterations, meaning per-token compute is
+        // currently far above that baseline (see Cargo.toml's `lto`/
+        // `codegen-units` comment -- this and that are both part of chasing
+        // the same gap, not independent fixes). A zero-length sleep is a
+        // near-free yield back to the scheduler/WDT reset path, same
+        // mechanism the generation loop below already uses every 8 steps.
+        std::thread::sleep(Duration::from_millis(0));
     }
 
-    // No equivalent of C's `llm_profile_reset(&s)` / the per-stage
-    // `s.profile.{input,attn,ffn,ple,head}_us` breakdown printed at the
-    // end: llm_core's Scratch doesn't carry that instrumentation (it
-    // wasn't ported -- see llm-core/src/scratch.rs), only this decode
-    // loop's own wall-clock timing around each `llm_forward_with_head_override`
-    // call, which is external to llm_core and needs no change there. The
-    // overall throughput number (the one the C reference's README
-    // actually reports, 102.9ms/step) is still fully and faithfully
-    // measured below; only the finer-grained internal breakdown is
-    // omitted. Worth adding back to llm_core as a follow-up if the
-    // per-stage numbers turn out to matter for on-device tuning.
+    // Matches C's `llm_profile_reset(&s)`, called right here (after
+    // priming, before the timed generation loop) -- see llm_core::Profile's
+    // doc comment for why this is a caller-owned value instead of a field
+    // baked into Scratch the way C's `#ifdef LLM_PROFILE` embeds it. Timing
+    // starts clean for the generation loop only, same as C: priming's KV
+    // cache is empty/growing in a way steady-state decode isn't, so C
+    // deliberately excludes it from the averaged breakdown too.
+    let mut prof = Profile::default();
     let t_start = unsafe { esp_timer_get_time() };
     let mut decode_us: i64 = 0;
     let mut decoded = 0usize;
@@ -149,7 +273,15 @@ fn main() {
         emit(tok);
 
         let d0 = unsafe { esp_timer_get_time() };
-        llm_forward_with_head_override(&model, tok, pos, &mut scratch, &mut head_matvec);
+        llm_forward_profiled(
+            &model,
+            tok,
+            pos,
+            &mut scratch,
+            &mut head_matvec,
+            &mut || unsafe { esp_timer_get_time() as u64 },
+            &mut prof,
+        );
         pos += 1;
         decode_us += unsafe { esp_timer_get_time() } - d0;
         decoded += 1;
@@ -173,6 +305,15 @@ fn main() {
             decode_us as f64 / 1000.0 / decoded as f64
         );
     }
+    // Matches esp32_llm.ino's closing `if (s.profile.calls) { ... }` block
+    // exactly, same format string and same divisor (calls*1000, converting
+    // an accumulated-microseconds total into an average ms/token per
+    // stage) -- see Profile::ms_per_token's doc comment.
+    if let Some([input, attn, ffn, ple, head]) = prof.ms_per_token() {
+        println!(
+            "profile ms/token: input {input:.1} | attn {attn:.1} | ffn {ffn:.1} | ple {ple:.1} | head {head:.1}"
+        );
+    }
     let _ = std::io::stdout().flush();
 
     // Matches C's `void loop() { delay(10000); }` -- setup() (this whole
@@ -191,7 +332,20 @@ fn main() {
 /// USB host becomes a real scenario instead of a hypothetical one.
 fn emit(tok: usize) {
     if let Some(bytes) = vocab::decode(tok) {
-        let _ = std::io::stdout().write_all(bytes);
+        let mut out = std::io::stdout();
+        let _ = out.write_all(bytes);
+        // Explicit flush, added after the first on-hardware run: without it,
+        // every token's bytes just accumulate in stdout's internal buffer
+        // with no guaranteed flush point in between, so a whole run's worth
+        // of output can show up as one delayed burst on the serial monitor
+        // instead of token-by-token -- fine for the final measured
+        // throughput number (that's wall-clock timed separately, around
+        // llm_forward_with_head_override, not around this write), but
+        // confusing when eyeballing live pacing or correlating output
+        // against the task watchdog's timestamps, which is exactly what
+        // debugging the current performance gap needs. Cost is one syscall
+        // per token, negligible next to a multi-millisecond forward pass.
+        let _ = out.flush();
     }
 }
 

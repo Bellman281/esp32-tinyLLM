@@ -23,12 +23,21 @@ use esp_idf_svc::hal::sys::{
     esp_partition_subtype_t, esp_partition_type_t_ESP_PARTITION_TYPE_DATA, EspError,
 };
 
-/// Ports the C setup()'s partition lookup + mmap:
+/// Ports the C setup()'s partition lookup + mmap. The C reference does:
 /// ```c
 /// const esp_partition_t *part = esp_partition_find_first(
 ///     ESP_PARTITION_TYPE_DATA, (esp_partition_subtype_t)0x40, "model");
 /// esp_partition_mmap(part, 0, part->size, ESP_PARTITION_MMAP_DATA, &base, &h);
 /// ```
+/// This port searches for subtype **0x06** (`undefined`), not the C
+/// reference's raw `0x40` -- `partitions.csv` had to move off `0x40` because
+/// `espflash`'s CSV parser (esp-idf-part 0.6.0) panics on any custom/numeric
+/// data-partition subtype (see that file's comment for the full story); `0x06`
+/// is ESP-IDF's own named `undefined` subtype and is what that file now
+/// declares for the `model` partition, so this lookup has to match it. Purely
+/// a partition-table bookkeeping detail -- doesn't touch the model bytes,
+/// their layout, or anything `llm-core` parses from them.
+///
 /// Returns the mapped region as a `&'static [u8]` -- 'static because the
 /// mapping lives for the rest of the program, same as the C code (it's
 /// never unmapped). The mmap handle itself is intentionally leaked, not
@@ -36,13 +45,13 @@ use esp_idf_svc::hal::sys::{
 /// pass, same as the reference.
 pub fn map_model_partition() -> Result<&'static [u8], &'static str> {
     unsafe {
-        // subtype 0x40: the custom "model" data partition type this project's
-        // partitions.csv defines (`model, data, 0x40, ...`) -- matches the C
-        // reference's `(esp_partition_subtype_t)0x40` cast exactly.
+        // subtype 0x06 == ESP-IDF's named `undefined` data subtype, matching
+        // partitions.csv's `model, data, undefined, ...` line -- see the doc
+        // comment above and that file's comment for why this isn't 0x40.
         let label = c"model";
         let part = esp_partition_find_first(
             esp_partition_type_t_ESP_PARTITION_TYPE_DATA,
-            0x40u32 as esp_partition_subtype_t,
+            0x06u32 as esp_partition_subtype_t,
             label.as_ptr(),
         );
         if part.is_null() {

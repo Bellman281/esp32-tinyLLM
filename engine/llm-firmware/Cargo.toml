@@ -25,6 +25,18 @@ harness = false # do not use the built-in cargo test harness -> resolve rust-ana
 opt-level = 3 # the C reference builds with -O3 (arduino-cli compiler.optimization_flags); "s"
               # (the esp-idf-template default, size-optimized) would leave real tok/s on the
               # table for a compute-bound matvec loop like this one.
+lto = "fat"          # whole-program LTO: lets LLVM inline across the llm-firmware/llm-core
+                      # crate boundary (matvec/rmsnorm/etc. are all called from main.rs but
+                      # defined in llm_core) and across llm_core's own module boundaries.
+                      # Off by default even under opt-level=3 -- easy to leave on the table
+                      # by accident, and this is a tight numeric hot loop, exactly the case
+                      # LTO is meant for. First on-hardware run (before this was added) was
+                      # tripping the 5s task watchdog repeatedly even in release, suggesting
+                      # per-token compute well above the C reference's ~103ms/step -- this is
+                      # step one of chasing that gap down, not a confirmed fix by itself.
+codegen-units = 1     # trade build time for letting the optimizer see the whole crate at
+                      # once instead of splitting it into parallel-compiled chunks it can't
+                      # optimize across -- standard pairing with lto="fat".
 
 [profile.dev]
 debug = true
@@ -37,6 +49,13 @@ esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git" }
 
 [dependencies]
 log = "0.4"
+# Only used by read_prompt_ids() in main.rs to bypass std::io::stdin(), which
+# esp-rs/esp-idf-hal#200 documents as not correctly implementing blocking/
+# non-blocking reads on ESP-IDF targets ("Rust's std does not allow it...
+# not implemented there for esp") -- a raw read(2) on fd 0 is the documented
+# workaround. Already transitively present (esp-idf-sys links against
+# ESP-IDF's newlib libc), so this is just naming it as a direct dependency.
+libc = "0.2"
 esp-idf-svc = { version = "0.52.1", features = ["critical-section", "embassy-time-driver", "embassy-sync"] }
 embassy-time = { version = "0.5", features = ["generic-queue-8"] }
 # No `int8-activations` feature here: the C firmware (esp32_llm.ino) does NOT

@@ -14,6 +14,7 @@
 
 use crate::attention;
 use crate::ops;
+use crate::profile::Profile;
 use crate::rope;
 use crate::scratch::Scratch;
 use crate::tensor::{Cfg, Cursor, FVec, LoadError, QT, MAGIC_CHECK};
@@ -213,7 +214,7 @@ fn matvec(t: &QT, x: &[f32], y: &mut [f32], iq: &mut [i8]) {
 /// dual-core int8-staged output head (`Model.head_matvec` in the C code),
 /// see `llm_forward_with_head_override` below.
 pub fn llm_forward(model: &Model, token: usize, pos: usize, s: &mut Scratch) {
-    llm_forward_impl(model, token, pos, s, None);
+    llm_forward_impl(model, token, pos, s, None, None);
 }
 
 /// Same decode step as `llm_forward`, but the final output-head matvec is
@@ -235,7 +236,29 @@ pub fn llm_forward_with_head_override(
     s: &mut Scratch,
     head: &mut dyn FnMut(&[f32], &mut [f32]),
 ) {
-    llm_forward_impl(model, token, pos, s, Some(head));
+    llm_forward_impl(model, token, pos, s, Some(head), None);
+}
+
+/// Same decode step as `llm_forward_with_head_override`, plus `llm.h`'s
+/// `#ifdef LLM_PROFILE` per-stage timing (see `profile.rs`'s doc comment for
+/// why the timestamp source is a caller-supplied closure rather than a
+/// baked-in clock). `now` is called once per stage boundary per layer
+/// (input once, then attn/ffn/ple per layer, then head once) -- same
+/// boundaries `llm.h` instruments, same accumulation into `prof`. Pass a
+/// fresh (or `.reset()`) `Profile` and call this instead of
+/// `llm_forward_with_head_override` only where you actually want the
+/// breakdown; the plain functions above have zero profiling overhead since
+/// they pass `None` straight through.
+pub fn llm_forward_profiled(
+    model: &Model,
+    token: usize,
+    pos: usize,
+    s: &mut Scratch,
+    head: &mut dyn FnMut(&[f32], &mut [f32]),
+    now: &mut dyn FnMut() -> u64,
+    prof: &mut Profile,
+) {
+    llm_forward_impl(model, token, pos, s, Some(head), Some((now, prof)));
 }
 
 fn llm_forward_impl(
@@ -244,7 +267,18 @@ fn llm_forward_impl(
     pos: usize,
     s: &mut Scratch,
     mut head: Option<&mut dyn FnMut(&[f32], &mut [f32])>,
+    mut prof: Option<(&mut dyn FnMut() -> u64, &mut Profile)>,
 ) {
+    // `last_t` tracks the timestamp at the previous stage boundary --
+    // matches `llm.h`'s reuse of a single rolling `profile_tN` local across
+    // stages (e.g. `profile_t1` is both "end of input prep" and, after
+    // being reassigned inside the loop, "end of this layer's PLE stage").
+    // Only ever read/written when `prof.is_some()`; the `0` default is
+    // never observed otherwise.
+    let mut last_t: u64 = 0;
+    if let Some((now, _)) = prof.as_mut() {
+        last_t = now();
+    }
     let cfg = &model.cfg;
     let d = cfg.dim;
     let l_layers = cfg.n_layers;
@@ -278,6 +312,12 @@ fn llm_forward_impl(
     // RoPE cos/sin for this position (see rope.rs for the dedicated-buffer note).
     rope::compute(pos, dh, cfg.rope_theta, s.rope_cos, s.rope_sin);
 
+    if let Some((now, p)) = prof.as_mut() {
+        let t = now();
+        p.input_us += t - last_t;
+        last_t = t;
+    }
+
     for l in 0..l_layers {
         let layer = model.layer(l);
 
@@ -303,6 +343,12 @@ fn llm_forward_impl(
             s.x[i] += s.h[i];
         }
 
+        if let Some((now, p)) = prof.as_mut() {
+            let t = now();
+            p.attn_us += t - last_t;
+            last_t = t;
+        }
+
         // ---- SwiGLU FFN
         ops::rmsnorm(s.x, layer.ffn_norm, d, s.h);
         matvec(&layer.gate, s.h, &mut s.g1[..f], s.iq);
@@ -315,6 +361,12 @@ fn llm_forward_impl(
             s.x[i] += s.h[i];
         }
 
+        if let Some((now, p)) = prof.as_mut() {
+            let t = now();
+            p.ffn_us += t - last_t;
+            last_t = t;
+        }
+
         // ---- PLE gate: x += RMSNorm(ple_proj(gelu(ple_gate(x)) * ple_l))
         matvec(&layer.ple_gate, s.x, &mut s.g2[..p], s.iq);
         for i in 0..p {
@@ -325,11 +377,23 @@ fn llm_forward_impl(
         for i in 0..d {
             s.x[i] += s.h[i];
         }
+
+        if let Some((now, p)) = prof.as_mut() {
+            let t = now();
+            p.ple_us += t - last_t;
+            last_t = t;
+        }
     }
 
     ops::rmsnorm_inplace(s.x, model.out_norm, d);
     match head.as_deref_mut() {
         Some(f) => f(s.x, s.logits),
         None => matvec(&model.tok_emb, s.x, s.logits, s.iq),
+    }
+
+    if let Some((now, p)) = prof.as_mut() {
+        let t = now();
+        p.head_us += t - last_t;
+        p.calls += 1;
     }
 }

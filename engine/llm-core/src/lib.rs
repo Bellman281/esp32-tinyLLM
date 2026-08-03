@@ -12,10 +12,14 @@
 pub mod attention;
 pub mod model;
 pub mod ops;
+pub mod profile;
 pub mod rope;
 pub mod scratch;
 pub mod tensor;
 
-pub use model::{llm_forward, llm_forward_with_head_override, Layer, Model, MAX_LAYERS};
+pub use model::{
+    llm_forward, llm_forward_profiled, llm_forward_with_head_override, Layer, Model, MAX_LAYERS,
+};
+pub use profile::Profile;
 pub use scratch::{sizes as scratch_sizes, Scratch, ScratchSizes};
 pub use tensor::{quantize_activations, Cfg, LoadError, FVec, QT};
