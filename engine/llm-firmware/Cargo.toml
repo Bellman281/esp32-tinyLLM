@@ -1,0 +1,40 @@
+[package]
+name = "llm-firmware"
+version = "0.1.0"
+authors = ["Omid Safarzadeh <omidpoly@gmail.com>"]
+edition = "2021"
+resolver = "2"
+rust-version = "1.82"
+
+[[bin]]
+name = "llm-firmware"
+harness = false # do not use the built-in cargo test harness -> resolve rust-analyzer errors
+
+[profile.release]
+opt-level = 3 # the C reference builds with -O3 (arduino-cli compiler.optimization_flags); "s"
+              # (the esp-idf-template default, size-optimized) would leave real tok/s on the
+              # table for a compute-bound matvec loop like this one.
+
+[profile.dev]
+debug = true
+opt-level = "z"
+
+[patch.crates-io]
+esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys.git" }
+esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal.git" }
+esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git" }
+
+[dependencies]
+log = "0.4"
+esp-idf-svc = { version = "0.52.1", features = ["critical-section", "embassy-time-driver", "embassy-sync"] }
+embassy-time = { version = "0.5", features = ["generic-queue-8"] }
+# No `int8-activations` feature here: the C firmware (esp32_llm.ino) does NOT
+# define LLM_INT8_ACT -- every tensor except the output head runs the plain
+# fp32-dequantized-weight matvec (matvec_q). Only the head is int8, and it's
+# staged/computed by this crate's own head.rs (llm_core::llm_forward_with_head_override),
+# entirely separate from llm-core's built-in int8-activations feature (which
+# would instead make EVERY matvec use int8 activations -- a different thing).
+llm_core = { path = "../llm-core" }
+
+[build-dependencies]
+embuild = "0.33"

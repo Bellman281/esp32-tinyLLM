@@ -1,0 +1,58 @@
+# Rust often needs a bit of an extra main task stack size compared to C (the default is 3K)
+# You might have to increase this further if you allocate large stack variables in the main task
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# Increase a bit these stack sizes as they are also a bit too small by default
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=4096
+
+# You might have to increase this further if you spawn your own Rust threads
+# that allocate large stack variables; or better yet - use
+# `std::thread::Builder::new().stack_size(XXX)` for spawning
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=4096
+
+# ---- Everything below this line is NOT part of the esp-idf-template default;
+# ---- added to match reference-c/firmware/esp32_llm/README.md's Arduino build
+# ---- flags (UploadSpeed=921600,USBMode=hwcdc,CDCOnBoot=cdc,FlashMode=qio,
+# ---- FlashSize=16M,PartitionScheme=custom,PSRAM=opi,CPUFreq=240) on an
+# ---- ESP32-S3 N16R8 (16MB flash, 8MB octal PSRAM). VERIFICATION STATUS: these
+# ---- option names are correct as of ESP-IDF v5.x per Espressif's own SPI
+# ---- Flash/PSRAM config guide, but this file has not been run through
+# ---- `idf.py menuconfig`/a real build -- if `cargo build` reports an unknown
+# ---- CONFIG_ key, that's ESP-IDF telling you the authoritative answer; fix
+# ---- it there; don't guess a second time here.
+
+# 8MB octal (OPI) PSRAM, matches the board's N16R8 module.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+# Fail fast at boot if PSRAM doesn't initialize, instead of silently running
+# on internal SRAM only and blowing the (much smaller) heap the moment
+# llm-firmware's ps() helper tries its first multi-hundred-KB allocation.
+CONFIG_SPIRAM_IGNORE_NOTFOUND=n
+
+# 16MB flash, quad flash I/O (the PSRAM is octal; the flash chip itself is
+# still QIO on this board -- matches FlashMode=qio in the Arduino build).
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+
+# Custom partition table (nvs/factory/model/coredump) -- see partitions.csv
+# in this directory, copied verbatim from reference-c/firmware/esp32_llm/.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# 240MHz CPU (matches CPUFreq=240 in the Arduino build -- the C reference's
+# 102.9ms/step number was measured at this clock).
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
+
+# ---- NOT set here on purpose: console-over-USB routing. The Arduino build
+# ---- used USBMode=hwcdc,CDCOnBoot=cdc (native USB-CDC as the `Serial`
+# ---- port); this file deliberately does NOT guess the ESP-IDF std-app
+# ---- equivalent (something in the CONFIG_ESP_CONSOLE_* family -- the
+# ---- exact key differs by whether the board's console is native USB-CDC
+# ---- vs USB-Serial-JTAG vs a plain UART, and guessing wrong here just
+# ---- means boot prints don't show up on the expected port, not a build
+# ---- failure). If `cargo run`'s serial monitor shows nothing, check
+# ---- `idf.py menuconfig` -> "Component config -> ESP System Settings ->
+# ---- Channel for console output" for the right key and add it here.

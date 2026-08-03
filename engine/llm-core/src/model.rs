@@ -144,6 +144,21 @@ impl<'a> Model<'a> {
     pub fn layer(&self, l: usize) -> Layer<'a> {
         bind_layer(self.base, self.layer_offsets[l], self.cfg.dim, self.cfg.ffn, self.cfg.ple_dim)
     }
+
+    /// The tied input/output embedding table, `[vocab, dim]`. `QT` is
+    /// `Copy`, so this returns an independent value the caller can freely
+    /// adjust -- e.g. `llm-firmware` caps `.rows` to the trained vocab
+    /// count (padding rows above that have no vocab entry and are never
+    /// scored) before staging it as int8, exactly like the C reference's
+    /// `model.tok_emb.rows = VOCAB_N;` before `stage_head_int8(&model.tok_emb)`.
+    /// Mutating the returned copy does not affect `llm_forward`, which
+    /// always reads the original untruncated table for the embedding
+    /// lookup (`deq_row(&m->tok_emb, token, ...)` in C never observes the
+    /// row cap either -- only the output-head path does, and only because
+    /// the platform routes it through `head_matvec`).
+    pub fn tok_emb(&self) -> QT<'a> {
+        self.tok_emb
+    }
 }
 
 /// Byte offset just past one layer's bind sequence, starting at `offset`.
@@ -192,13 +207,44 @@ fn matvec(t: &QT, x: &[f32], y: &mut [f32], iq: &mut [i8]) {
 /// responsible for calling with increasing `pos` values, same contract as
 /// the C `llm_forward`.
 ///
-/// Platform-specific overrides (the ESP32 firmware's dual-core int8-staged
-/// output head, `Model.head_matvec` in the C code) are deliberately not
-/// modeled here -- that's a `llm-firmware` (Phase 3) concern, out of scope
-/// for this platform-agnostic crate. This always runs the standard head
-/// matvec, matching every host tool (gen_prompt.c, host_generate.c,
-/// verify.c, ppl.c never set head_matvec either).
+/// This is the path every host tool uses (gen_prompt.c, host_generate.c,
+/// verify.c, ppl.c never set `head_matvec` either) -- the output head runs
+/// through the same matvec as everything else. For the ESP32 firmware's
+/// dual-core int8-staged output head (`Model.head_matvec` in the C code),
+/// see `llm_forward_with_head_override` below.
 pub fn llm_forward(model: &Model, token: usize, pos: usize, s: &mut Scratch) {
+    llm_forward_impl(model, token, pos, s, None);
+}
+
+/// Same decode step as `llm_forward`, but the final output-head matvec is
+/// replaced by `head` when given -- ports the C code's optional
+/// `Model.head_matvec` function-pointer override (`x: &[f32]` in,
+/// `y: &mut [f32]` logits out, same shapes `llm_forward` would have used).
+/// `None` behaves identically to plain `llm_forward` (same code path,
+/// verified by `llm-host`'s test suite).
+///
+/// This is the hook `llm-firmware` (Phase 3) uses for the dual-core
+/// int8-staged head: the closure captures the PSRAM-staged int8 weights
+/// and the FreeRTOS task handle for the other core's half of the rows,
+/// while every other tensor op in this function -- the part already
+/// verified against PyTorch -- doesn't change at all.
+pub fn llm_forward_with_head_override(
+    model: &Model,
+    token: usize,
+    pos: usize,
+    s: &mut Scratch,
+    head: &mut dyn FnMut(&[f32], &mut [f32]),
+) {
+    llm_forward_impl(model, token, pos, s, Some(head));
+}
+
+fn llm_forward_impl(
+    model: &Model,
+    token: usize,
+    pos: usize,
+    s: &mut Scratch,
+    mut head: Option<&mut dyn FnMut(&[f32], &mut [f32])>,
+) {
     let cfg = &model.cfg;
     let d = cfg.dim;
     let l_layers = cfg.n_layers;
@@ -282,5 +328,8 @@ pub fn llm_forward(model: &Model, token: usize, pos: usize, s: &mut Scratch) {
     }
 
     ops::rmsnorm_inplace(s.x, model.out_norm, d);
-    matvec(&model.tok_emb, s.x, s.logits, s.iq);
+    match head.as_deref_mut() {
+        Some(f) => f(s.x, s.logits),
+        None => matvec(&model.tok_emb, s.x, s.logits, s.iq),
+    }
 }

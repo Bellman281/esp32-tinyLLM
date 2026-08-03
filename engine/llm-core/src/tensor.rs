@@ -31,6 +31,44 @@ fn round_ties_even(x: f32) -> f32 {
     }
 }
 
+/// Quantizes `x[..iq.len()]` to int8 by max-abs scaling. Ports the C
+/// reference's free-standing `quantize_act` in llm.h, which both
+/// `matvec_q8` (host/lib) and, on-device, `head_matvec_int8`
+/// (`firmware/esp32_llm/esp32_llm.ino`'s dual-core staged output head)
+/// call -- pulled out to a public function here for the same reason: two
+/// call sites, one quantization implementation, so `llm-firmware`'s head
+/// module gets the exact int8-activation numerics `llm-host`'s ppl parity
+/// tests already verified against the C reference, instead of a
+/// hand-rolled second copy that could silently drift (e.g. by using
+/// `libm::roundf`'s round-half-away-from-zero instead of `lrintf`'s
+/// round-to-nearest-even -- see the tie-breaking note below).
+///
+/// Returns the dequant scale (`x_scale` in C): `x[j] ~= iq[j] as f32 * scale`.
+pub fn quantize_activations(x: &[f32], iq: &mut [i8]) -> f32 {
+    let n = iq.len();
+    debug_assert!(x.len() >= n);
+    let mut xmax = 1e-8f32;
+    for &v in &x[..n] {
+        let a = libm::fabsf(v);
+        if a > xmax {
+            xmax = a;
+        }
+    }
+    let inv = 127.0f32 / xmax;
+    for j in 0..n {
+        // C uses `(int)lrintf(...)`, which rounds with the CPU's current
+        // rounding mode -- round-to-nearest-even under the IEEE754
+        // default, NOT round-half-away-from-zero. `libm::roundf` is the
+        // latter, so it silently disagrees with C on exact .5 ties; over a
+        // few thousand activations that's enough to shift the
+        // int8-activation perplexity in the last printed digit.
+        // round_ties_even() below reproduces lrintf's tie-breaking.
+        let q = round_ties_even(x[j] * inv) as i32;
+        iq[j] = q.clamp(-127, 127) as i8;
+    }
+    xmax / 127.0f32
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadError {
     TooShort,
@@ -127,32 +165,37 @@ impl<'a> QT<'a> {
         self.matvec_range(x, y, 0, rows);
     }
 
+    /// Unpacks the int4 codes of row `r` into `out[..self.cols]` as raw
+    /// -8..=7 signed bytes (no scale applied), and returns that row's
+    /// dequant scale. Ports the per-row body of
+    /// `firmware/esp32_llm/esp32_llm.ino`'s `stage_head_int8`, which
+    /// unpacks the tied output-embedding head from int4 to int8 once at
+    /// boot (into PSRAM) instead of dequantizing to fp32 on every token --
+    /// `llm-firmware`'s dual-core int8 head uses this.
+    ///
+    /// Assumes `self.n_groups == 1` for this row (only the group-0 scale is
+    /// read), matching the C code's own `// n_groups==1` comment at the
+    /// call site -- true for the shipped models' tok_emb (`group=128 >=
+    /// cols=96`, see `llm-host`'s tests), but this is the caller's
+    /// contract to uphold, not something this method checks. A tensor with
+    /// `group < cols` (more than one group per row) has more than one
+    /// scale per row and can't be represented by a single `f32` return;
+    /// use `deq_row` for that case instead.
+    pub fn unpack_row_int8(&self, r: usize, out: &mut [i8]) -> f32 {
+        debug_assert!(out.len() >= self.cols);
+        for j in 0..self.cols {
+            out[j] = self.code(r, j) as i8;
+        }
+        self.scale(r, 0)
+    }
+
     /// int8-activation path (SIMD-friendly form used on-device). Ports
     /// `matvec_q8_range` / `matvec_q8` / `quantize_act`. `iq` is caller-owned
     /// scratch (>= self.cols), replacing the C static buffer so this is
     /// reentrant/thread-safe instead of relying on a shared global.
     pub fn matvec_int8_activations(&self, x: &[f32], y: &mut [f32], iq: &mut [i8]) {
         let n = self.cols;
-        let mut xmax = 1e-8f32;
-        for &v in &x[..n] {
-            let a = libm::fabsf(v);
-            if a > xmax {
-                xmax = a;
-            }
-        }
-        let inv = 127.0f32 / xmax;
-        for j in 0..n {
-            // C uses `(int)lrintf(...)`, which rounds with the CPU's
-            // current rounding mode -- round-to-nearest-even under the
-            // IEEE754 default, NOT round-half-away-from-zero. `libm::roundf`
-            // is the latter, so it silently disagrees with C on exact .5
-            // ties; over a few thousand activations that's enough to shift
-            // the int8-activation perplexity in the last printed digit.
-            // round_ties_even() below reproduces lrintf's tie-breaking.
-            let q = round_ties_even(x[j] * inv) as i32;
-            iq[j] = q.clamp(-127, 127) as i8;
-        }
-        let x_scale = xmax / 127.0f32;
+        let x_scale = quantize_activations(&x[..n], &mut iq[..n]);
 
         for r in 0..self.rows {
             let mut acc = 0f32;

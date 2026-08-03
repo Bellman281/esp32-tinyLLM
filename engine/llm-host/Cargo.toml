@@ -23,6 +23,10 @@ path = "src/bin/host_generate.rs"
 name = "ppl"
 path = "src/bin/ppl.rs"
 
+[[bin]]
+name = "vocab-to-bin"
+path = "src/bin/vocab_to_bin.rs"
+
 [dependencies]
 llm_core = { path = "../llm-core" }
 

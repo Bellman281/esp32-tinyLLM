@@ -42,6 +42,26 @@ impl Vocab {
         }
         Some(&self.blob[self.off[tok]..self.off[tok + 1]])
     }
+
+    /// Writes this table out as two flat binary files instead of the C
+    /// header's array-literal source text: `blob_path` gets the raw
+    /// `VOCAB_BLOB` bytes as-is, `off_path` gets `VOCAB_OFF` as
+    /// little-endian `u32`s (n+1 entries, same as the C array).
+    ///
+    /// `llm-firmware` embeds these via `include_bytes!` instead of linking
+    /// `vocab.h` as C -- same data, but it keeps the on-device binary pure
+    /// Rust with no C interop for something that's a data table, not
+    /// logic. Regenerate these any time `vocab.h` changes (new export,
+    /// retrained tokenizer): run `cargo run --release --bin vocab-to-bin --
+    /// <vocab.h> <blob.bin> <off.bin>` from `llm-host/`.
+    pub fn dump_binary(&self, blob_path: &str, off_path: &str) -> std::io::Result<()> {
+        std::fs::write(blob_path, &self.blob)?;
+        let mut off_bytes = Vec::with_capacity(self.off.len() * 4);
+        for &o in &self.off {
+            off_bytes.extend_from_slice(&(o as u32).to_le_bytes());
+        }
+        std::fs::write(off_path, &off_bytes)
+    }
 }
 
 fn parse_define(text: &str, name: &str) -> Option<usize> {
