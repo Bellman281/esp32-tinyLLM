@@ -1,0 +1,27 @@
+[package]
+name = "llm_core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Portable, platform-agnostic core: config/tensor parsing, int4/int8
+# dequantization + matvec kernels, rmsnorm/gelu/silu, RoPE, causal attention
+# with KV cache, SwiGLU FFN, PLE per-layer gate, and the llm_forward() decode
+# step. No ESP32, no FreeRTOS, no esp-hal/esp-idf dependency of any kind.
+#
+# Ports, function for function, from reference-c/firmware/common/llm.h.
+#
+# no_std (core + libm only), so this crate compiles unchanged for both the
+# host test binary (llm-host) and the on-device firmware (llm-firmware,
+# later).
+
+[lib]
+name = "llm_core"
+
+[dependencies]
+half = { version = "2", default-features = false }
+libm = "0.2"
+
+[features]
+default = []
+int8-activations = []
