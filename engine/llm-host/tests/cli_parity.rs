@@ -31,7 +31,8 @@ fn host_generate_cli_matches_c_reference_byte_for_byte() {
         .expect("failed to invoke cargo build");
     assert!(build.success(), "cargo build --bin host-generate failed");
 
-    let exe = env!("CARGO_MANIFEST_DIR").to_string() + "/target/release/host-generate";
+    let exe = env!("CARGO_BIN_EXE_host-generate");
+
     let output = Command::new(exe)
         .args([MODEL_BIN, VOCAB_H])
         .output()
