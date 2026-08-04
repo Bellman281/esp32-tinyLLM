@@ -160,6 +160,51 @@ fn main() {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
 
+    // Force UART0's console VFS into driver-managed (interrupt-driven) mode.
+    //
+    // Root cause, established across three independent host-side tests this
+    // debugging session (a clean pyserial write from `chat_device.py`, a raw
+    // `libc::read` swap on the device side making zero difference, and
+    // typing straight into espflash's own verified-bidirectional monitor):
+    // stdin never received a single byte on this board's application
+    // firmware, in ANY combination -- while `espflash flash` succeeding
+    // repeatedly the same session proves RX definitely works at the ROM
+    // bootloader stage over this exact link. So the fault is specific to
+    // how the *application* console initializes UART0, not the wiring.
+    //
+    // ESP-IDF's default console mode (no driver installed) has `uart_vfs`
+    // read bytes one at a time straight from the hardware FIFO via a ROM
+    // helper, with no interrupt handler ever pulling the receiver out of
+    // whatever state application-level startup leaves it in. Installing the
+    // real UART driver and switching the VFS to use it
+    // (`uart_vfs_dev_use_driver`) is ESP-IDF's own documented fix for
+    // exactly this class of "stdout fine, stdin silent" symptom. `rx_buffer_size`
+    // must exceed the hardware FIFO (128 bytes on this SoC) per
+    // `uart_driver_install`'s own contract. `tx_buffer_size = 0` keeps TX
+    // blocking/unbuffered, i.e. leaves the println! path that already works
+    // untouched. Not yet confirmed on hardware -- next flash is the test.
+    unsafe {
+        use esp_idf_svc::hal::sys::{uart_driver_install, uart_vfs_dev_use_driver};
+        // Real signatures (confirmed against this project's own generated
+        // bindings.rs, not guessed): `uart_driver_install`'s uart_num is
+        // `uart_port_t` (a `c_uint`/u32), but `uart_vfs_dev_use_driver`'s is
+        // a plain `c_int`/i32 -- two different integer types for "which
+        // UART" across two functions in the same header.
+        let err = uart_driver_install(
+            0u32, // uart_port_t == c_uint
+            256,  // rx_buffer_size -- must exceed the 128-byte HW FIFO
+            0,    // tx_buffer_size -- 0 = blocking/unbuffered, matches current TX behavior
+            0,    // queue_size -- not using the UART event queue
+            std::ptr::null_mut(),
+            0, // intr_alloc_flags
+        );
+        if err != 0 {
+            log::warn!("uart_driver_install failed (err {err}); stdin will likely still be silent");
+        } else {
+            uart_vfs_dev_use_driver(0i32); // c_int == i32
+        }
+    }
+
     println!("\n=== ESP32-S3 PLE TinyLM ===");
     // Matches C's `delay(1500)`: gives a USB-CDC host time to enumerate
     // before the first print, so early boot logs aren't lost.
