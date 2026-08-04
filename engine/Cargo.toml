@@ -3,9 +3,14 @@ resolver = "2"
 members = [
     "llm-core",
     "llm-host",
-    # "llm-firmware", # TODO: uncomment at Phase 3 (needs the ESP32-S3 Rust
-                       # toolchain installed first — see llm-firmware/README.md)
-    # "llm-display",  # TODO: uncomment at Phase 4 (optional, deferred)
+    # "llm-firmware" is deliberately NOT listed here, even though it's
+    # written now (Phase 3) -- it targets xtensa-esp32s3-espidf and needs
+    # `build-std`/a custom linker/the ESP-IDF C SDK, none of which mix well
+    # with this workspace's plain host build. It opts out via its own
+    # empty `[workspace]` table (see engine/llm-firmware/Cargo.toml) rather
+    # than being excluded here, so build it as its own project:
+    # `cd llm-firmware && cargo build`. Same will apply to "llm-display"
+    # once Phase 4 starts it -- also ESP32-target code.
 ]
 
 # Workspace-wide release profile will be tuned here once we're benchmarking

@@ -1,0 +1,79 @@
+# Rust often needs a bit of an extra main task stack size compared to C (the default is 3K)
+# You might have to increase this further if you allocate large stack variables in the main task
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# Increase a bit these stack sizes as they are also a bit too small by default
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=4096
+
+# You might have to increase this further if you spawn your own Rust threads
+# that allocate large stack variables; or better yet - use
+# `std::thread::Builder::new().stack_size(XXX)` for spawning
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=4096
+
+# ---- Everything below this line is NOT part of the esp-idf-template default;
+# ---- added to match reference-c/firmware/esp32_llm/README.md's Arduino build
+# ---- flags (UploadSpeed=921600,USBMode=hwcdc,CDCOnBoot=cdc,FlashMode=qio,
+# ---- FlashSize=16M,PartitionScheme=custom,PSRAM=opi,CPUFreq=240) on an
+# ---- ESP32-S3 N16R8 (16MB flash, 8MB octal PSRAM). VERIFICATION STATUS: these
+# ---- option names are correct as of ESP-IDF v5.x per Espressif's own SPI
+# ---- Flash/PSRAM config guide, but this file has not been run through
+# ---- `idf.py menuconfig`/a real build -- if `cargo build` reports an unknown
+# ---- CONFIG_ key, that's ESP-IDF telling you the authoritative answer; fix
+# ---- it there; don't guess a second time here.
+
+# 8MB octal (OPI) PSRAM, matches the board's N16R8 module.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+# Fail fast at boot if PSRAM doesn't initialize, instead of silently running
+# on internal SRAM only and blowing the (much smaller) heap the moment
+# llm-firmware's ps() helper tries its first multi-hundred-KB allocation.
+CONFIG_SPIRAM_IGNORE_NOTFOUND=n
+
+# 16MB flash, quad flash I/O (the PSRAM is octal; the flash chip itself is
+# still QIO on this board -- matches FlashMode=qio in the Arduino build).
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+
+# ---- NOT set here on purpose: CONFIG_PARTITION_TABLE_CUSTOM /
+# ---- CONFIG_PARTITION_TABLE_CUSTOM_FILENAME. This file's own custom
+# ---- partition table -- nvs/factory/model/coredump -- still lives at
+# ---- ./partitions.csv in this directory (copied verbatim from
+# ---- reference-c/firmware/esp32_llm/), but esp-idf-sys's CMake build
+# ---- resolves CONFIG_PARTITION_TABLE_CUSTOM_FILENAME against its own
+# ---- synthetic OUT_DIR project, not this crate root, so a relative
+# ---- filename here fails with a ninja error ("no known rule to make
+# ---- .../out/partitions.csv") -- a known, already-documented esp-idf-sys
+# ---- limitation (esp-rs/esp-idf-sys#395; see the README's "Known
+# ---- limitations" section). Its own documented fix is exactly this: leave
+# ---- these two keys unset, and pass the table at flash time instead --
+# ---- see .cargo/config.toml's `runner`, which now does
+# ---- `espflash flash --partition-table partitions.csv --monitor`.
+
+# 240MHz CPU (matches CPUFreq=240 in the Arduino build -- the C reference's
+# 102.9ms/step number was measured at this clock).
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
+
+# ---- Console routing: REVERTED. Tried forcing CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+# ---- as primary (theory: the board's /dev/cu.usbmodem* port is the chip's native
+# ---- USB-Serial-JTAG peripheral, and secondary consoles are output-only, so stdin
+# ---- could never arrive while USB was demoted to secondary). On real hardware this
+# ---- reproducibly hung at boot right after "cpu_start: Multicore app", both after a
+# ---- soft (DTR) reset and after a full physical power cycle -- consistent with this
+# ---- board actually wiring its USB connector to an EXTERNAL bridge chip sitting on
+# ---- the UART0 pins (GPIO43/44) rather than to the chip's native USB D+/D- pins, in
+# ---- which case USB-Serial-JTAG-as-primary points the console at a peripheral with
+# ---- nothing physically attached, and it blocks forever waiting for a USB host that
+# ---- can never appear there. Reverted to ESP-IDF's own default (UART primary, USB
+# ---- Serial/JTAG secondary) rather than keep guessing at wiring; see main.rs's
+# ---- read_prompt_ids() for the actual fix, which doesn't touch console routing at
+# ---- all -- esp-rs/esp-idf-hal#200 documents std::io::stdin() itself being broken
+# ---- for blocking reads on ESP-IDF, regardless of which channel is primary, with
+# ---- a raw libc::read(STDIN_FILENO, ...) call as the confirmed workaround.
+# ----
+# ---- (Original comment, still accurate: the Arduino build used USBMode=hwcdc,
+# ---- CDCOnBoot=cdc -- if `cargo run`'s serial monitor ever shows nothing at all,
+# ---- check `idf.py menuconfig` -> "Component config -> ESP System Settings ->
+# ---- Channel for console output" before re-guessing a CONFIG_ESP_CONSOLE_* key here.)

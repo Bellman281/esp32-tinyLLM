@@ -1,0 +1,34 @@
+[build]
+target = "xtensa-esp32s3-espidf"
+
+[target.'cfg(target_os = "espidf")']
+linker = "ldproxy"
+# --partition-table is required here (not just at CMake-config time) because
+# sdkconfig.defaults deliberately does NOT set CONFIG_PARTITION_TABLE_CUSTOM*
+# -- see that file's comment for why (esp-rs/esp-idf-sys#395: a relative
+# custom partition table filename there fails the CMake build entirely).
+# This is the documented workaround: point espflash at the real table
+# directly when flashing, instead of trying to bake it into the CMake build.
+runner = "espflash flash --partition-table partitions.csv --monitor"
+rustflags = [ "--cfg",  "espidf_time64"]
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
+[env]
+MCU = "esp32s3"
+ESP_IDF_VERSION = "v5.5.3"
+ESP_IDF_TOOLS_INSTALL_DIR = "workspace"
+
+# This crate is deliberately its own standalone Cargo project (like the
+# esp32-rust/ template you generated), NOT a member of engine/'s
+# [workspace] alongside llm-core/llm-host -- mixing a std-host workspace
+# with an Xtensa/espidf target in one `cargo build` invocation is exactly
+# the kind of thing that goes wrong in ways that are hard to debug. It
+# still depends on llm-core via a plain relative path dependency below;
+# that works fine across separate Cargo projects without workspace
+# membership.
+#
+# Uncomment this if you have moved the target dir by setting CARGO_TARGET_DIR or similar.
+# Required for now due to embuild limitations.
+#CARGO_WORKSPACE_DIR = { value = "", relative = true }

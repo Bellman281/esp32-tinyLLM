@@ -1,0 +1,70 @@
+[package]
+name = "llm-firmware"
+version = "0.1.0"
+authors = ["Omid Safarzadeh <omidpoly@gmail.com>"]
+edition = "2021"
+resolver = "2"
+rust-version = "1.82"
+
+# Empty [workspace] table: this is Cargo's own mechanism for "this package
+# is not a member of any ancestor workspace, stop looking" -- without it,
+# `cargo build` here fails outright (`current package believes it's in a
+# workspace when it's not`), because Cargo walks up to engine/Cargo.toml's
+# `[workspace]` table and finds this package listed in neither `members`
+# nor `exclude`. Deliberately NOT added to engine/Cargo.toml's `members`
+# instead (even though that file's comment suggested doing exactly that) --
+# see .cargo/config.toml's comment on why a std-host workspace and an
+# Xtensa/espidf cross target don't mix well in one `cargo build`.
+[workspace]
+
+[[bin]]
+name = "llm-firmware"
+harness = false # do not use the built-in cargo test harness -> resolve rust-analyzer errors
+
+[profile.release]
+opt-level = 3 # the C reference builds with -O3 (arduino-cli compiler.optimization_flags); "s"
+              # (the esp-idf-template default, size-optimized) would leave real tok/s on the
+              # table for a compute-bound matvec loop like this one.
+lto = "fat"          # whole-program LTO: lets LLVM inline across the llm-firmware/llm-core
+                      # crate boundary (matvec/rmsnorm/etc. are all called from main.rs but
+                      # defined in llm_core) and across llm_core's own module boundaries.
+                      # Off by default even under opt-level=3 -- easy to leave on the table
+                      # by accident, and this is a tight numeric hot loop, exactly the case
+                      # LTO is meant for. First on-hardware run (before this was added) was
+                      # tripping the 5s task watchdog repeatedly even in release, suggesting
+                      # per-token compute well above the C reference's ~103ms/step -- this is
+                      # step one of chasing that gap down, not a confirmed fix by itself.
+codegen-units = 1     # trade build time for letting the optimizer see the whole crate at
+                      # once instead of splitting it into parallel-compiled chunks it can't
+                      # optimize across -- standard pairing with lto="fat".
+
+[profile.dev]
+debug = true
+opt-level = "z"
+
+[patch.crates-io]
+esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys.git" }
+esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal.git" }
+esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git" }
+
+[dependencies]
+log = "0.4"
+# Only used by read_prompt_ids() in main.rs to bypass std::io::stdin(), which
+# esp-rs/esp-idf-hal#200 documents as not correctly implementing blocking/
+# non-blocking reads on ESP-IDF targets ("Rust's std does not allow it...
+# not implemented there for esp") -- a raw read(2) on fd 0 is the documented
+# workaround. Already transitively present (esp-idf-sys links against
+# ESP-IDF's newlib libc), so this is just naming it as a direct dependency.
+libc = "0.2"
+esp-idf-svc = { version = "0.52.1", features = ["critical-section", "embassy-time-driver", "embassy-sync"] }
+embassy-time = { version = "0.5", features = ["generic-queue-8"] }
+# No `int8-activations` feature here: the C firmware (esp32_llm.ino) does NOT
+# define LLM_INT8_ACT -- every tensor except the output head runs the plain
+# fp32-dequantized-weight matvec (matvec_q). Only the head is int8, and it's
+# staged/computed by this crate's own head.rs (llm_core::llm_forward_with_head_override),
+# entirely separate from llm-core's built-in int8-activations feature (which
+# would instead make EVERY matvec use int8 activations -- a different thing).
+llm_core = { path = "../llm-core" }
+
+[build-dependencies]
+embuild = "0.33"

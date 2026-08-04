@@ -1,0 +1,23 @@
+# Name,    Type, SubType, Offset,    Size,      Flags
+#
+# `model`'s SubType is `undefined` (ESP-IDF's own named value 0x06), not a
+# raw custom hex byte like the C reference's `0x40` -- espflash's CSV parser
+# (esp-idf-part 0.6.0, the latest release as of this writing) panics on ANY
+# custom/numeric data-partition subtype: `From<DeserializedCsvPartition> for
+# Partition` re-derives the subtype via `SubType::data(byte)`, which only
+# accepts ESP-IDF's small set of named values (nvs/phy/coredump/etc. plus
+# `undefined`) and calls `.unwrap()` on the lookup -- any other byte panics
+# with "called `Option::unwrap()` on a `None` value" at partition/mod.rs:157,
+# even though the per-field CSV parser handles custom subtypes correctly (it
+# even has a passing unit test for `0x40` specifically -- the bug is only in
+# this later re-derivation step, which throws that correct parse away).
+# `undefined` is ESP-IDF's own designated subtype for exactly this "opaque
+# custom data blob" case, so this isn't a workaround so much as the more
+# correct name for what this partition actually is. Only the label on this
+# line changed -- offset/size/the partition's role are identical to the C
+# reference; `partition.rs`'s `esp_partition_find_first` call was updated to
+# search for subtype 0x06 (matching `undefined`) to stay in sync.
+nvs,       data, nvs,     0x9000,    0x5000,
+factory,   app,  factory, 0x10000,   0x100000,
+model,     data, undefined, 0x110000, 0xEE0000,
+coredump,  data, coredump,0xFF0000,  0x10000,

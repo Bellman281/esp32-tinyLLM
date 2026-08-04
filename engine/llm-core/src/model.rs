@@ -14,6 +14,7 @@
 
 use crate::attention;
 use crate::ops;
+use crate::profile::Profile;
 use crate::rope;
 use crate::scratch::Scratch;
 use crate::tensor::{Cfg, Cursor, FVec, LoadError, QT, MAGIC_CHECK};
@@ -144,6 +145,21 @@ impl<'a> Model<'a> {
     pub fn layer(&self, l: usize) -> Layer<'a> {
         bind_layer(self.base, self.layer_offsets[l], self.cfg.dim, self.cfg.ffn, self.cfg.ple_dim)
     }
+
+    /// The tied input/output embedding table, `[vocab, dim]`. `QT` is
+    /// `Copy`, so this returns an independent value the caller can freely
+    /// adjust -- e.g. `llm-firmware` caps `.rows` to the trained vocab
+    /// count (padding rows above that have no vocab entry and are never
+    /// scored) before staging it as int8, exactly like the C reference's
+    /// `model.tok_emb.rows = VOCAB_N;` before `stage_head_int8(&model.tok_emb)`.
+    /// Mutating the returned copy does not affect `llm_forward`, which
+    /// always reads the original untruncated table for the embedding
+    /// lookup (`deq_row(&m->tok_emb, token, ...)` in C never observes the
+    /// row cap either -- only the output-head path does, and only because
+    /// the platform routes it through `head_matvec`).
+    pub fn tok_emb(&self) -> QT<'a> {
+        self.tok_emb
+    }
 }
 
 /// Byte offset just past one layer's bind sequence, starting at `offset`.
@@ -192,13 +208,77 @@ fn matvec(t: &QT, x: &[f32], y: &mut [f32], iq: &mut [i8]) {
 /// responsible for calling with increasing `pos` values, same contract as
 /// the C `llm_forward`.
 ///
-/// Platform-specific overrides (the ESP32 firmware's dual-core int8-staged
-/// output head, `Model.head_matvec` in the C code) are deliberately not
-/// modeled here -- that's a `llm-firmware` (Phase 3) concern, out of scope
-/// for this platform-agnostic crate. This always runs the standard head
-/// matvec, matching every host tool (gen_prompt.c, host_generate.c,
-/// verify.c, ppl.c never set head_matvec either).
+/// This is the path every host tool uses (gen_prompt.c, host_generate.c,
+/// verify.c, ppl.c never set `head_matvec` either) -- the output head runs
+/// through the same matvec as everything else. For the ESP32 firmware's
+/// dual-core int8-staged output head (`Model.head_matvec` in the C code),
+/// see `llm_forward_with_head_override` below.
 pub fn llm_forward(model: &Model, token: usize, pos: usize, s: &mut Scratch) {
+    llm_forward_impl(model, token, pos, s, None, None);
+}
+
+/// Same decode step as `llm_forward`, but the final output-head matvec is
+/// replaced by `head` when given -- ports the C code's optional
+/// `Model.head_matvec` function-pointer override (`x: &[f32]` in,
+/// `y: &mut [f32]` logits out, same shapes `llm_forward` would have used).
+/// `None` behaves identically to plain `llm_forward` (same code path,
+/// verified by `llm-host`'s test suite).
+///
+/// This is the hook `llm-firmware` (Phase 3) uses for the dual-core
+/// int8-staged head: the closure captures the PSRAM-staged int8 weights
+/// and the FreeRTOS task handle for the other core's half of the rows,
+/// while every other tensor op in this function -- the part already
+/// verified against PyTorch -- doesn't change at all.
+pub fn llm_forward_with_head_override(
+    model: &Model,
+    token: usize,
+    pos: usize,
+    s: &mut Scratch,
+    head: &mut dyn FnMut(&[f32], &mut [f32]),
+) {
+    llm_forward_impl(model, token, pos, s, Some(head), None);
+}
+
+/// Same decode step as `llm_forward_with_head_override`, plus `llm.h`'s
+/// `#ifdef LLM_PROFILE` per-stage timing (see `profile.rs`'s doc comment for
+/// why the timestamp source is a caller-supplied closure rather than a
+/// baked-in clock). `now` is called once per stage boundary per layer
+/// (input once, then attn/ffn/ple per layer, then head once) -- same
+/// boundaries `llm.h` instruments, same accumulation into `prof`. Pass a
+/// fresh (or `.reset()`) `Profile` and call this instead of
+/// `llm_forward_with_head_override` only where you actually want the
+/// breakdown; the plain functions above have zero profiling overhead since
+/// they pass `None` straight through.
+pub fn llm_forward_profiled(
+    model: &Model,
+    token: usize,
+    pos: usize,
+    s: &mut Scratch,
+    head: &mut dyn FnMut(&[f32], &mut [f32]),
+    now: &mut dyn FnMut() -> u64,
+    prof: &mut Profile,
+) {
+    llm_forward_impl(model, token, pos, s, Some(head), Some((now, prof)));
+}
+
+fn llm_forward_impl(
+    model: &Model,
+    token: usize,
+    pos: usize,
+    s: &mut Scratch,
+    mut head: Option<&mut dyn FnMut(&[f32], &mut [f32])>,
+    mut prof: Option<(&mut dyn FnMut() -> u64, &mut Profile)>,
+) {
+    // `last_t` tracks the timestamp at the previous stage boundary --
+    // matches `llm.h`'s reuse of a single rolling `profile_tN` local across
+    // stages (e.g. `profile_t1` is both "end of input prep" and, after
+    // being reassigned inside the loop, "end of this layer's PLE stage").
+    // Only ever read/written when `prof.is_some()`; the `0` default is
+    // never observed otherwise.
+    let mut last_t: u64 = 0;
+    if let Some((now, _)) = prof.as_mut() {
+        last_t = now();
+    }
     let cfg = &model.cfg;
     let d = cfg.dim;
     let l_layers = cfg.n_layers;
@@ -232,6 +312,12 @@ pub fn llm_forward(model: &Model, token: usize, pos: usize, s: &mut Scratch) {
     // RoPE cos/sin for this position (see rope.rs for the dedicated-buffer note).
     rope::compute(pos, dh, cfg.rope_theta, s.rope_cos, s.rope_sin);
 
+    if let Some((now, p)) = prof.as_mut() {
+        let t = now();
+        p.input_us += t - last_t;
+        last_t = t;
+    }
+
     for l in 0..l_layers {
         let layer = model.layer(l);
 
@@ -257,6 +343,12 @@ pub fn llm_forward(model: &Model, token: usize, pos: usize, s: &mut Scratch) {
             s.x[i] += s.h[i];
         }
 
+        if let Some((now, p)) = prof.as_mut() {
+            let t = now();
+            p.attn_us += t - last_t;
+            last_t = t;
+        }
+
         // ---- SwiGLU FFN
         ops::rmsnorm(s.x, layer.ffn_norm, d, s.h);
         matvec(&layer.gate, s.h, &mut s.g1[..f], s.iq);
@@ -269,6 +361,12 @@ pub fn llm_forward(model: &Model, token: usize, pos: usize, s: &mut Scratch) {
             s.x[i] += s.h[i];
         }
 
+        if let Some((now, p)) = prof.as_mut() {
+            let t = now();
+            p.ffn_us += t - last_t;
+            last_t = t;
+        }
+
         // ---- PLE gate: x += RMSNorm(ple_proj(gelu(ple_gate(x)) * ple_l))
         matvec(&layer.ple_gate, s.x, &mut s.g2[..p], s.iq);
         for i in 0..p {
@@ -279,8 +377,23 @@ pub fn llm_forward(model: &Model, token: usize, pos: usize, s: &mut Scratch) {
         for i in 0..d {
             s.x[i] += s.h[i];
         }
+
+        if let Some((now, p)) = prof.as_mut() {
+            let t = now();
+            p.ple_us += t - last_t;
+            last_t = t;
+        }
     }
 
     ops::rmsnorm_inplace(s.x, model.out_norm, d);
-    matvec(&model.tok_emb, s.x, s.logits, s.iq);
+    match head.as_deref_mut() {
+        Some(f) => f(s.x, s.logits),
+        None => matvec(&model.tok_emb, s.x, s.logits, s.iq),
+    }
+
+    if let Some((now, p)) = prof.as_mut() {
+        let t = now();
+        p.head_us += t - last_t;
+        p.calls += 1;
+    }
 }
