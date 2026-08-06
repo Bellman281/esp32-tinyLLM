@@ -116,3 +116,32 @@ CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1=y
 # ---- watched -- the head worker blocks on its notification between tokens, so
 # ---- IDLE0 does get scheduled, and a genuine hang there is still caught.
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+
+# ---- External-memory cache. ESP-IDF's defaults are 32KB data cache with a
+# ---- 32-byte line and a 16KB instruction cache; arduino-esp32 ships larger,
+# ---- which matters here because this workload is external-memory-bound end to
+# ---- end -- the staged head streams 2.43 MB from PSRAM and every layer reads
+# ---- its weights through the flash mmap, so all five profile stages sit on
+# ---- the same path. The measured symptom: with the dual-core fix in, every
+# ---- stage was still ~2x the C reference's published per-stage numbers,
+# ---- uniformly (head 110.9 vs 57.6, attn 58.9 vs 25.6, ple 15.1 vs 8.5,
+# ---- ffn 11.8 vs 6.9, input 8.0 vs 4.4). A uniform ratio is not what one bad
+# ---- kernel looks like. The head managed 21.9 MB/s where the C reference's
+# ---- README records 44 MB/s on the identical read and calls itself
+# ---- PSRAM-bandwidth-bound.
+# ----
+# ---- The 64-byte line is the important one: each miss fetches twice the
+# ---- useful data per MSPI transaction. Third-party measurement on this exact
+# ---- silicon puts sequential PSRAM reads at 83 MB/s with a 32B line and
+# ---- 124 MB/s with 64B (+49%):
+# ---- https://qiita.com/elect-gombe/items/5221c0490125c7628453
+# ---- Doubling the cache sizes costs 48 KB of internal SRAM (16KB->32KB
+# ---- instruction, 32KB->64KB data), against ~380 KB free at boot.
+# ----
+# ---- STATUS: hypothesis backed by third-party measurement, not yet confirmed
+# ---- on this board. If the re-measured profile does NOT move, revert these
+# ---- three and the remaining gap is a codegen story, not a memory one --
+# ---- GCC's Xtensa backend against LLVM's on an integer dot-product loop.
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+CONFIG_ESP32S3_DATA_CACHE_64KB=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y

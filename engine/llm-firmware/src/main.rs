@@ -31,17 +31,19 @@ use llm_core::{llm_forward_profiled, llm_forward_with_head_override, Model, Prof
 use std::io::Write;
 use std::time::Duration;
 
-/// "Once upon a time, there was a dragon who loved to fly" -- swapped from
-/// the original "Once upon a time" (esp32_llm.ino's hardcoded `PROMPT_IDS`,
-/// ids [433, 447, 259, 405]) purely because stdin still delivers zero bytes
-/// on real hardware (see `read_prompt_ids`'s doc comment below), so this
-/// fallback is currently the *only* prompt that ever actually runs. IDs
-/// found by greedy longest-match encoding against the real vocab table
+/// "Once upon a time, there was a little girl who loved her dolls and her
+/// baby brother" -- swapped from the original "Once upon a time"
+/// (esp32_llm.ino's hardcoded `PROMPT_IDS`, ids [433, 447, 259, 405]) purely
+/// because stdin still delivers zero bytes on real hardware (see
+/// `read_prompt_ids`'s doc comment below), so this fallback is currently the
+/// *only* prompt that ever actually runs. IDs found by greedy longest-match
+/// encoding against the real vocab table
 /// (`reference-c/esp32-llm-lab/vocab.h`) and round-trip-verified to decode
 /// back to this exact string byte-for-byte. Swap this array (and only this
 /// array) to try a different topic until the stdin bug is fixed.
-const DEFAULT_PROMPT_IDS: [usize; 13] =
-    [433, 447, 259, 405, 12, 406, 282, 259, 1726, 591, 504, 266, 939];
+const DEFAULT_PROMPT_IDS: [usize; 18] = [
+    433, 447, 259, 405, 12, 406, 282, 259, 403, 450, 591, 504, 309, 1719, 265, 309, 1512, 1222,
+];
 /// Wait on stdin for a prompt before generating?
 ///
 /// `false`, and that is the configuration this port is actually verified
