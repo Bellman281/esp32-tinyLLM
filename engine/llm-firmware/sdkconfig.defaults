@@ -77,3 +77,42 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
 # ---- CDCOnBoot=cdc -- if `cargo run`'s serial monitor ever shows nothing at all,
 # ---- check `idf.py menuconfig` -> "Component config -> ESP System Settings ->
 # ---- Channel for console output" before re-guessing a CONFIG_ESP_CONSOLE_* key here.)
+
+# ---- Task watchdog timeout: raised from ESP-IDF's default of 5s. The
+# ---- generation loop's own `step % 8` watchdog feed (main.rs) only yields
+# ---- *between* steps -- it can't help when a single step's own compute (in
+# ---- particular the `head` worker task's int8 matvec across the full 32768
+# ---- vocab, seen as "CPU0: head" in the backtraces) itself runs long enough
+# ---- to starve IDLE0 past 5s. That's a real stall, just not a stuck one --
+# ---- generation keeps producing correct tokens right through every one of
+# ---- these triggers. 20s comfortably covers the slowest observed single
+# ---- step while still catching a *genuine* hang (the whole 400-token run
+# ---- only takes ~2 minutes total, so a real deadlock would still trip this
+# ---- well before the run's own timeout budget elsewhere). Left as
+# ---- warn-and-continue (CONFIG_ESP_TASK_WDT_PANIC unset -- IDF's own
+# ---- default), not reset-on-trigger, matching the current behavior.
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=20
+
+# ---- Core affinity: THE dual-core fix. ESP-IDF pins the main task to CPU0 by
+# ---- default (CONFIG_ESP_MAIN_TASK_AFFINITY=0x0, confirmed in the generated
+# ---- sdkconfig), and head::stage_and_spawn pins the head worker to Core0 too
+# ---- -- faithfully copying the C reference's
+# ---- `xTaskCreatePinnedToCore(head_worker_main, "head", 4096, NULL, 2, ..., 0)`.
+# ---- But the C reference is an Arduino sketch: its setup()/loop() run in
+# ---- `loopTask`, which arduino-esp32 pins to CPU1. So in C the two halves of
+# ---- the head matvec really do run on two cores; in this port they were both
+# ---- queued on CPU0, running one after the other with a task switch in
+# ---- between. That is the single biggest reason the head measured 193.8 ms
+# ---- against a whole C step of 102.9 ms, and it is also why the backtraces
+# ---- showed "CPU 0: main" and "CPU 0: head" while IDLE0 starved.
+# ---- Moving the main task to CPU1 restores the C topology exactly:
+# ---- decode loop on CPU1, head worker on CPU0.
+CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1=y
+
+# ---- Consequence of the line above, and the same choice arduino-esp32 makes
+# ---- in its own sdkconfig: with the decode loop legitimately owning CPU1 for
+# ---- minutes at a time, IDLE1 is starved by design, not by a bug. Arduino
+# ---- ships with the CPU1 idle check off for exactly this reason. IDLE0 stays
+# ---- watched -- the head worker blocks on its notification between tokens, so
+# ---- IDLE0 does get scheduled, and a genuine hang there is still caught.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
