@@ -106,19 +106,35 @@ impl Head {
         // runs (either core), the write that populated it has already
         // happened-before, and nothing writes it again until both readers
         // are done.
-        let actq = unsafe { &*self.actq.get() };
+        let cols = self.cols;
+        let w8 = self.w8;
+        let scale8 = self.scale8;
+        // Slice the fixed-size scratch down to `cols` ONCE, out here, rather
+        // than indexing `actq[j]` in the inner loop. `actq` is a
+        // `[i8; MAX_HEAD_COLS]` (128) but `cols` is a runtime field, so inside
+        // the loop LLVM cannot prove `j < 128` and emits a bounds check per
+        // multiply-accumulate -- on a loop body that runs `rows * cols` = 2.4M
+        // times per token. Slicing here gives the two iterators a common,
+        // provable length, so the zip below carries no bounds checks at all
+        // and the unroller can work on it. Same arithmetic either way; this is
+        // purely about what reaches the backend.
+        // Two steps, not `&(*self.actq.get())[..cols]` -- that form trips
+        // rustc's deny-by-default `dangerous_implicit_autorefs` lint
+        // (the index would autoref through the raw pointer deref).
+        let actq_all: &[i8; MAX_HEAD_COLS] = unsafe { &*self.actq.get() };
+        let actq: &[i8] = &actq_all[..cols];
         let acts = f32::from_bits(self.acts.load(Ordering::Acquire));
         for r in r0..r1 {
-            let row = &self.w8[r * self.cols..(r + 1) * self.cols];
+            let row = &w8[r * cols..r * cols + cols];
             // Matches C's `dot_i8`: plain int32 accumulation, no
             // saturation (codes are -8..=7, activations -127..=127, cols
             // <= 128, so the max possible |acc| is 8*127*128 ~= 130k --
             // nowhere near i32::MAX).
             let mut acc: i32 = 0;
-            for j in 0..self.cols {
-                acc += actq[j] as i32 * row[j] as i32;
+            for (&a, &w) in actq.iter().zip(row.iter()) {
+                acc += a as i32 * w as i32;
             }
-            let val = acc as f32 * self.scale8[r] * acts;
+            let val = acc as f32 * scale8[r] * acts;
             // SAFETY: caller's contract (see this fn's doc comment) is
             // that `y[r0..r1]` is this call's alone to write.
             unsafe { core::ptr::write(y.add(r), val) };

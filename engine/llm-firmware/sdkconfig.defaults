@@ -77,3 +77,71 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
 # ---- CDCOnBoot=cdc -- if `cargo run`'s serial monitor ever shows nothing at all,
 # ---- check `idf.py menuconfig` -> "Component config -> ESP System Settings ->
 # ---- Channel for console output" before re-guessing a CONFIG_ESP_CONSOLE_* key here.)
+
+# ---- Task watchdog timeout: raised from ESP-IDF's default of 5s. The
+# ---- generation loop's own `step % 8` watchdog feed (main.rs) only yields
+# ---- *between* steps -- it can't help when a single step's own compute (in
+# ---- particular the `head` worker task's int8 matvec across the full 32768
+# ---- vocab, seen as "CPU0: head" in the backtraces) itself runs long enough
+# ---- to starve IDLE0 past 5s. That's a real stall, just not a stuck one --
+# ---- generation keeps producing correct tokens right through every one of
+# ---- these triggers. 20s comfortably covers the slowest observed single
+# ---- step while still catching a *genuine* hang (the whole 400-token run
+# ---- only takes ~2 minutes total, so a real deadlock would still trip this
+# ---- well before the run's own timeout budget elsewhere). Left as
+# ---- warn-and-continue (CONFIG_ESP_TASK_WDT_PANIC unset -- IDF's own
+# ---- default), not reset-on-trigger, matching the current behavior.
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=20
+
+# ---- Core affinity: THE dual-core fix. ESP-IDF pins the main task to CPU0 by
+# ---- default (CONFIG_ESP_MAIN_TASK_AFFINITY=0x0, confirmed in the generated
+# ---- sdkconfig), and head::stage_and_spawn pins the head worker to Core0 too
+# ---- -- faithfully copying the C reference's
+# ---- `xTaskCreatePinnedToCore(head_worker_main, "head", 4096, NULL, 2, ..., 0)`.
+# ---- But the C reference is an Arduino sketch: its setup()/loop() run in
+# ---- `loopTask`, which arduino-esp32 pins to CPU1. So in C the two halves of
+# ---- the head matvec really do run on two cores; in this port they were both
+# ---- queued on CPU0, running one after the other with a task switch in
+# ---- between. That is the single biggest reason the head measured 193.8 ms
+# ---- against a whole C step of 102.9 ms, and it is also why the backtraces
+# ---- showed "CPU 0: main" and "CPU 0: head" while IDLE0 starved.
+# ---- Moving the main task to CPU1 restores the C topology exactly:
+# ---- decode loop on CPU1, head worker on CPU0.
+CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1=y
+
+# ---- Consequence of the line above, and the same choice arduino-esp32 makes
+# ---- in its own sdkconfig: with the decode loop legitimately owning CPU1 for
+# ---- minutes at a time, IDLE1 is starved by design, not by a bug. Arduino
+# ---- ships with the CPU1 idle check off for exactly this reason. IDLE0 stays
+# ---- watched -- the head worker blocks on its notification between tokens, so
+# ---- IDLE0 does get scheduled, and a genuine hang there is still caught.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+
+# ---- External-memory cache. ESP-IDF's defaults are 32KB data cache with a
+# ---- 32-byte line and a 16KB instruction cache; arduino-esp32 ships larger,
+# ---- which matters here because this workload is external-memory-bound end to
+# ---- end -- the staged head streams 2.43 MB from PSRAM and every layer reads
+# ---- its weights through the flash mmap, so all five profile stages sit on
+# ---- the same path. The measured symptom: with the dual-core fix in, every
+# ---- stage was still ~2x the C reference's published per-stage numbers,
+# ---- uniformly (head 110.9 vs 57.6, attn 58.9 vs 25.6, ple 15.1 vs 8.5,
+# ---- ffn 11.8 vs 6.9, input 8.0 vs 4.4). A uniform ratio is not what one bad
+# ---- kernel looks like. The head managed 21.9 MB/s where the C reference's
+# ---- README records 44 MB/s on the identical read and calls itself
+# ---- PSRAM-bandwidth-bound.
+# ----
+# ---- The 64-byte line is the important one: each miss fetches twice the
+# ---- useful data per MSPI transaction. Third-party measurement on this exact
+# ---- silicon puts sequential PSRAM reads at 83 MB/s with a 32B line and
+# ---- 124 MB/s with 64B (+49%):
+# ---- https://qiita.com/elect-gombe/items/5221c0490125c7628453
+# ---- Doubling the cache sizes costs 48 KB of internal SRAM (16KB->32KB
+# ---- instruction, 32KB->64KB data), against ~380 KB free at boot.
+# ----
+# ---- STATUS: hypothesis backed by third-party measurement, not yet confirmed
+# ---- on this board. If the re-measured profile does NOT move, revert these
+# ---- three and the remaining gap is a codegen story, not a memory one --
+# ---- GCC's Xtensa backend against LLVM's on an integer dot-product loop.
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+CONFIG_ESP32S3_DATA_CACHE_64KB=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y

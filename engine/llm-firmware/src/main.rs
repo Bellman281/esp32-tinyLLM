@@ -31,14 +31,39 @@ use llm_core::{llm_forward_profiled, llm_forward_with_head_override, Model, Prof
 use std::io::Write;
 use std::time::Duration;
 
-/// "Once upon a time" -- matches `esp32_llm.ino`'s hardcoded `PROMPT_IDS`
-/// exactly (cross-checked against the embedded vocab table in `vocab.rs`'s
-/// doc comment: token 433 decodes to "Once", 447 to " upon", etc). Now only
-/// the *fallback* prompt (see `read_prompt_ids`'s doc comment) -- the C
-/// reference has no runtime input path at all, so this is a deliberate
-/// deviation, not a port of anything in `esp32_llm.ino`.
-const DEFAULT_PROMPT_IDS: [usize; 4] = [433, 447, 259, 405];
-const N_GENERATE: usize = 200;
+/// "Once upon a time, there was a little girl who loved her dolls and her
+/// baby brother" -- swapped from the original "Once upon a time"
+/// (esp32_llm.ino's hardcoded `PROMPT_IDS`, ids [433, 447, 259, 405]) purely
+/// because stdin still delivers zero bytes on real hardware (see
+/// `read_prompt_ids`'s doc comment below), so this fallback is currently the
+/// *only* prompt that ever actually runs. IDs found by greedy longest-match
+/// encoding against the real vocab table
+/// (`reference-c/esp32-llm-lab/vocab.h`) and round-trip-verified to decode
+/// back to this exact string byte-for-byte. Swap this array (and only this
+/// array) to try a different topic until the stdin bug is fixed.
+const DEFAULT_PROMPT_IDS: [usize; 18] = [
+    433, 447, 259, 405, 12, 406, 282, 259, 403, 450, 591, 504, 309, 1719, 265, 309, 1512, 1222,
+];
+/// Wait on stdin for a prompt before generating?
+///
+/// `false`, and that is the configuration this port is actually verified
+/// against rather than a workaround being papered over: the C reference never
+/// reads stdin either -- `esp32_llm.ino` decodes the fixed `PROMPT_IDS` baked in
+/// via `vocab.h`. `DEFAULT_PROMPT_IDS` above is that same mechanism, so parity
+/// with `golden.txt` is reachable without stdin working at all.
+///
+/// Left on, as it was, every boot spent 20 seconds waiting on a UART path that
+/// has never delivered a byte on this board -- dead time in front of every
+/// timing measurement, gating Phase 3 on a console bug Phase 3 does not depend
+/// on. The interactive prompt is a feature beyond the C reference's behaviour;
+/// it belongs after parity, not in front of it.
+///
+/// Flip to `true` to test the UART0 driver-mode fix (see `install_uart_driver`).
+const STDIN_PROMPT: bool = false;
+
+const N_GENERATE: usize = 400; // bumped from 200 -- still safely under the model's 512-token
+                                // hard context ceiling (seq_len, from the model file's own
+                                // header) even with a short prompt on top.
 
 /// Reads one line of comma-separated token IDs from stdin (wired to the
 /// USB-CDC console by ESP-IDF's std-app console VFS driver -- the same
@@ -151,6 +176,59 @@ fn read_prompt_ids() -> std::vec::Vec<usize> {
     }
 }
 
+/// Installs the real UART0 driver and points the console VFS at it.
+///
+/// Only called when `STDIN_PROMPT` is set. Unproven on hardware, and it
+/// reconfigures the same peripheral the working `println!` path uses -- so it
+/// stays off the default boot path until confirmed, rather than sitting between
+/// every flash and every measurement.
+fn install_uart_driver() {
+    // Force UART0's console VFS into driver-managed (interrupt-driven) mode.
+    //
+    // Root cause, established across three independent host-side tests this
+    // debugging session (a clean pyserial write from `chat_device.py`, a raw
+    // `libc::read` swap on the device side making zero difference, and
+    // typing straight into espflash's own verified-bidirectional monitor):
+    // stdin never received a single byte on this board's application
+    // firmware, in ANY combination -- while `espflash flash` succeeding
+    // repeatedly the same session proves RX definitely works at the ROM
+    // bootloader stage over this exact link. So the fault is specific to
+    // how the *application* console initializes UART0, not the wiring.
+    //
+    // ESP-IDF's default console mode (no driver installed) has `uart_vfs`
+    // read bytes one at a time straight from the hardware FIFO via a ROM
+    // helper, with no interrupt handler ever pulling the receiver out of
+    // whatever state application-level startup leaves it in. Installing the
+    // real UART driver and switching the VFS to use it
+    // (`uart_vfs_dev_use_driver`) is ESP-IDF's own documented fix for
+    // exactly this class of "stdout fine, stdin silent" symptom. `rx_buffer_size`
+    // must exceed the hardware FIFO (128 bytes on this SoC) per
+    // `uart_driver_install`'s own contract. `tx_buffer_size = 0` keeps TX
+    // blocking/unbuffered, i.e. leaves the println! path that already works
+    // untouched. Not yet confirmed on hardware -- next flash is the test.
+    unsafe {
+        use esp_idf_svc::hal::sys::{uart_driver_install, uart_vfs_dev_use_driver};
+        // Real signatures (confirmed against this project's own generated
+        // bindings.rs, not guessed): `uart_driver_install`'s uart_num is
+        // `uart_port_t` (a `c_uint`/u32), but `uart_vfs_dev_use_driver`'s is
+        // a plain `c_int`/i32 -- two different integer types for "which
+        // UART" across two functions in the same header.
+        let err = uart_driver_install(
+            0u32, // uart_port_t == c_uint
+            256,  // rx_buffer_size -- must exceed the 128-byte HW FIFO
+            0,    // tx_buffer_size -- 0 = blocking/unbuffered, matches current TX behavior
+            0,    // queue_size -- not using the UART event queue
+            std::ptr::null_mut(),
+            0, // intr_alloc_flags
+        );
+        if err != 0 {
+            log::warn!("uart_driver_install failed (err {err}); stdin will likely still be silent");
+        } else {
+            uart_vfs_dev_use_driver(0i32); // c_int == i32
+        }
+    }
+}
+
 fn main() {
     // Standard esp-idf-svc std-app boilerplate (matches the confirmed-
     // working `cargo generate esp-rs/esp-idf-template` skeleton this
@@ -159,6 +237,10 @@ fn main() {
     // route through ESP-IDF's own logger.
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
+
+    if STDIN_PROMPT {
+        install_uart_driver();
+    }
 
     println!("\n=== ESP32-S3 PLE TinyLM ===");
     // Matches C's `delay(1500)`: gives a USB-CDC host time to enumerate
@@ -217,7 +299,13 @@ fn main() {
     // field.
     let mut head_matvec = |x: &[f32], y: &mut [f32]| head.matvec(x, y);
 
-    let prompt_ids = read_prompt_ids();
+    let prompt_ids = if STDIN_PROMPT {
+        read_prompt_ids()
+    } else {
+        // Same path the C reference takes: a fixed, baked-in prompt.
+        println!("prompt: baked-in default ({} ids)", DEFAULT_PROMPT_IDS.len());
+        DEFAULT_PROMPT_IDS.to_vec()
+    };
 
     print!(">>> ");
     let _ = std::io::stdout().flush();
