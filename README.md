@@ -38,26 +38,51 @@ for the full reasoning and the ground rules this port follows.
 **Phases 0–2 are verified on a laptop** against the C reference, with no
 ESP32 involved — that is what the parity table below covers.
 
-**Phase 3 now runs on real hardware.** First on-silicon run: 400 tokens of
-correct text on an ESP32-S3-DevKitC (N16R8), at 3.21 tok/s against the C
-reference's 9.5. The per-token profile pointed at the output head — 193.8 ms
-of a 307.4 ms token — and comparing the two sources found two causes, both
-now fixed and awaiting a re-measure:
+**Phase 3 now runs on real hardware** on an ESP32-S3-DevKitC (N16R8):
+400 tokens of correct text, no watchdog trips. Performance is being closed
+against the C reference, which publishes its own per-stage profile in
+`reference-c/firmware/esp32_llm/README.md` (102.9 ms/step, 9.72 tok/s
+compute-only) -- so every number below is a like-for-like comparison, not an
+estimate.
 
-- **The dual-core head split was not actually dual-core.** `head.rs` pins its
-  worker to CPU0, faithfully copying the C reference's
-  `xTaskCreatePinnedToCore(..., 0)`. But the C reference is an Arduino sketch,
-  and arduino-esp32 runs `loop()` on CPU1; ESP-IDF instead pins the main task
-  to CPU0 by default. So both halves of the head matvec were queueing on one
-  core, with a task switch between them. `CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1`
-  in `sdkconfig.defaults` restores the C topology. This is also why the
-  backtraces showed IDLE0 starving.
-- **`QT::matvec_range` was doing two loads per multiply-accumulate.** C's
-  `matvec_q_range` unpacks both nibbles of each packed byte in one pass; the
-  Rust port called a `code(r, j)` helper per column, re-reading the same byte
-  and branching on `j & 1` each time — on the path that owns attention, FFN
-  and PLE. Now unrolled the same way C does it, and asserted bit-identical to
-  the naive form by `llm-core`'s own `byte_pair_unroll_matches_naive_bit_for_bit`.
+| ms/token | input | attn | ffn | ple | head | total | tok/s |
+|---|---|---|---|---|---|---|---|
+| C reference | 4.4 | 25.6 | 6.9 | 8.5 | 57.6 | 102.9 | 9.72 |
+| Rust, first run | 10.6 | 66.7 | 15.8 | 20.4 | 193.8 | 307.4 | 3.21 |
+| + dual-core, byte-pair unroll | 8.0 | 58.9 | 11.8 | 15.1 | 110.9 | 204.8 | 4.79 |
+| + wider caches | 7.4 | 53.7 | 11.2 | 14.3 | 87.6 | 174.2 | 5.64 |
+
+Three changes got it from 3.0x slower than C to 1.69x. In order of what they
+were worth:
+
+1. **The dual-core head split was not actually dual-core.** `head.rs` pins its
+   worker to CPU0, faithfully copying the C reference's
+   `xTaskCreatePinnedToCore(..., 0)`. But the C reference is an Arduino sketch,
+   and arduino-esp32 runs `loop()` on CPU1; ESP-IDF instead pins the main task
+   to CPU0 by default. Both halves of the head matvec were queueing on one
+   core, with a task switch between them. `CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1`
+   restores the C topology. Same root cause as the IDLE0-starvation backtraces,
+   which are now gone.
+2. **`QT::matvec_range` did two loads per multiply-accumulate.** C's
+   `matvec_q_range` unpacks both nibbles of each packed byte in one pass; the
+   Rust port called a `code(r, j)` helper per column, re-reading the same byte
+   and branching on `j & 1`. Now unrolled the same way, and asserted
+   bit-identical to a naive reference by
+   `llm-core`'s `byte_pair_unroll_matches_naive_bit_for_bit`.
+3. **The external-memory caches were at ESP-IDF's defaults**, not
+   arduino-esp32's: 32KB data cache with a 32-byte line, 16KB instruction
+   cache. Doubling all three (48 KB of internal SRAM) took the head from
+   110.9 to 87.6 ms -- the head streams 2.43 MB of PSRAM sequentially, which is
+   exactly the access pattern a wider cache line helps.
+
+**What is left is not a port bug.** `attention.rs` is now the worst ratio
+(2.10x) and it is a line-for-line translation of the same loop in
+`reference-c/firmware/common/llm.h` -- same passes, same accumulation order,
+same strided kcache/vcache reads. Its access pattern is strided rather than
+sequential, which is why the cache change barely moved it (-9%, against -21%
+for the head). The remaining gap is most likely GCC's Xtensa backend against
+LLVM's on scalar float and integer dot-product loops, and the lever that would
+actually beat it is the S3's SIMD unit, not more flag-tuning.
 
 ## Verified parity (Phases 1–2)
 
