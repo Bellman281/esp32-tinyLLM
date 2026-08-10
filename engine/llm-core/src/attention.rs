@@ -1,6 +1,24 @@
 //! Causal self-attention with a persistent KV cache. Ports the attention
 //! block inlined in `llm_forward` (the `for hh in 0..H` loop and the
 //! kcache/vcache memcpy before it).
+//!
+//! PERFORMANCE NOTE: the two hot loops below (`dot += qh[i]*kt[i]` and
+//! `ao[i] += w*vt[i]`) used raw `usize` indexing until this fix -- the
+//! same shape `tensor.rs`'s `matvec_range`/`matvec_int8_activations` were
+//! found to be doing needless per-element work in before their
+//! byte-pair-unroll fix (see that fix's doc comment). `qh`/`kt`/`ao`/`vt`
+//! are always freshly sliced to exactly `head_dim` right before these
+//! loops, so LLVM *can* prove the indices are in range, but proving it
+//! reliably at every optimization level is exactly what an indexed loop
+//! makes it work harder for -- `.zip()` over two slices of a shared,
+//! provable length hands the backend that fact directly instead of
+//! leaving it to infer, the same reasoning `matvec_range`'s doc comment
+//! gives for why it slices `actq`/`row` down before zipping. Attention is
+//! this port's worst C-vs-Rust ratio (2.10x, see the top-level README's
+//! Status section) and this is a pure loop-shape change -- same
+//! left-to-right summation order, so bit-for-bit output is unaffected;
+//! verified via `llm-host`'s golden/ppl/cli parity tests, which would
+//! catch even a single bit of drift.
 
 /// Write this position's post-RoPE k/v into the per-layer cache, then run
 /// causal multi-head attention over `0..=pos` and write the result into
@@ -42,9 +60,11 @@ pub fn forward(
         let mut maxs = -1e30f32;
         for t in 0..=pos {
             let kt = &kcache_layer[t * dim + hh * head_dim..t * dim + hh * head_dim + head_dim];
+            // Same summation order as the old `for i in 0..head_dim`
+            // loop -- see this module's doc comment.
             let mut dot = 0.0f32;
-            for i in 0..head_dim {
-                dot += qh[i] * kt[i];
+            for (&a, &b) in qh.iter().zip(kt.iter()) {
+                dot += a * b;
             }
             dot *= scale;
             scores[t] = dot;
@@ -58,12 +78,14 @@ pub fn forward(
             let w = libm::expf(scores[t] - maxs);
             denom += w;
             let vt = &vcache_layer[t * dim + hh * head_dim..t * dim + hh * head_dim + head_dim];
-            for i in 0..head_dim {
-                ao[i] += w * vt[i];
+            // Same summation order as the old `for i in 0..head_dim`
+            // loop -- see this module's doc comment.
+            for (av, &vv) in ao.iter_mut().zip(vt.iter()) {
+                *av += w * vv;
             }
         }
-        for i in 0..head_dim {
-            ao[i] /= denom;
+        for v in ao.iter_mut() {
+            *v /= denom;
         }
     }
 }
