@@ -1,8 +1,13 @@
 # Rust build artifacts
 target/
 
+# macOS Finder metadata
+.DS_Store
+
 # Local scratch / cleanup staging (not part of the tracked project)
 engine/_to_delete/
+/_to_delete/
+model/_to_delete/
 
 # Xtensa/ESP-IDF template output (esp32-rust/) is its own separate,
 # not-yet-folded-in project -- deliberately not tracked here until it's
