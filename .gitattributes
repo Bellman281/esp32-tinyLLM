@@ -1,0 +1,9 @@
+# reference-c/ is a verbatim, frozen mirror of the upstream C/C++/Arduino
+# repo (slvDev/esp32-ai) kept here only so the Rust port can be checked
+# against it -- it is not code written in this repo. Exclude it (and the
+# other reference/data copies) from GitHub's language stats so the bar
+# reflects what's actually being authored here.
+reference-c/** linguist-vendored
+model/** linguist-vendored
+data/** linguist-vendored
+demo/bpe32768.json linguist-vendored
