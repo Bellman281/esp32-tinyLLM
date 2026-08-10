@@ -102,7 +102,8 @@ already works — an optional override hook in `llm-firmware` that FFIs into
 `dsps_dp_s8_aes3` per group, falling back to the scalar loop when absent.
 Needs the row's packed nibbles unpacked to contiguous `i8` first (cost worth
 measuring against the MAC savings), and real ESP-IDF hardware to benchmark —
-neither available in this sandbox.
+neither available in this sandbox. **Good first issue for a contributor with
+ESP-IDF hardware access — see [CONTRIBUTING.md](./CONTRIBUTING.md).**
 
 ## Verified parity (Phases 1–2)
 
@@ -142,9 +143,11 @@ detail.
 ```
 esp32-tinyLLM/
   README.md              <- this file
+  CONTRIBUTING.md          <- how to build/test, and what's open to work on
   LICENSE                  <- Apache License 2.0
   MIGRATION_PLAN.md       <- phase-by-phase plan, ground rules, full detail
   model/                    <- trained model + dataset docs
+  demo/                     <- interactive CLI demo (Python REPL over the C engine)
   reference-c/             <- frozen, read-only copy of the C/C++ engine
                                (verified against this, never edited)
   data/                     <- validation tokens for the ppl parity test
@@ -175,6 +178,14 @@ scoped and sequenced this way, `engine/llm-core/src/tensor.rs` and
 `model.rs` for the actual ported math (cross-reference against
 `reference-c/firmware/common/llm.h`), and `engine/llm-host/tests/` for how
 correctness is actually being enforced rather than assumed.
+
+## Contributing
+
+The main open work is closing the Rust-vs-C performance gap in the table
+above — see [CONTRIBUTING.md](./CONTRIBUTING.md) for the ground rules
+(`reference-c/` is frozen, `llm-core` stays platform-agnostic), how to run
+the parity tests, and the current best starting point (the SIMD thread
+above).
 
 ## References
 

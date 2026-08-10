@@ -235,18 +235,46 @@ impl<'a> QT<'a> {
     /// `matvec_q8_range` / `matvec_q8` / `quantize_act`. `iq` is caller-owned
     /// scratch (>= self.cols), replacing the C static buffer so this is
     /// reentrant/thread-safe instead of relying on a shared global.
+    ///
+    /// PERFORMANCE NOTE: this had the same per-element `self.code(r, j)` gap
+    /// `matvec_range` was fixed for (see that method's doc comment) -- one
+    /// byte load + `j & 1` branch per element instead of two elements per
+    /// packed byte. Same fix applied here: unpack both nibbles of each byte
+    /// in one pass. Pure integer arithmetic (`i32`), summed in the same
+    /// left-to-right element order as before, so this is exactly associative
+    /// -- not just "close" -- to the old loop; no new float-rounding
+    /// question the way the fp32 `matvec_range` change had to reason about.
+    /// Verified bit-for-bit unchanged output via `golden.rs` and
+    /// `ppl_parity.rs`'s int8-activations tests (both still require exact
+    /// agreement with the previously-captured C-reference numbers) and
+    /// `cli_parity.rs`'s int8 greedy-decode byte-for-byte check.
     pub fn matvec_int8_activations(&self, x: &[f32], y: &mut [f32], iq: &mut [i8]) {
         let n = self.cols;
         let x_scale = quantize_activations(&x[..n], &mut iq[..n]);
 
         for r in 0..self.rows {
+            let row = &self.codes[r * self.row_bytes..(r + 1) * self.row_bytes];
             let mut acc = 0f32;
             for gi in 0..self.n_groups {
                 let begin = gi * self.group;
                 let end = core::cmp::min(begin + self.group, self.cols);
                 let mut g: i32 = 0;
-                for j in begin..end {
-                    g += self.code(r, j) * iq[j] as i32;
+                let mut j = begin;
+                if j & 1 == 1 && j < end {
+                    let byte = row[j >> 1];
+                    g += ((byte >> 4) as i32 - 8) * iq[j] as i32;
+                    j += 1;
+                }
+                while j + 1 < end {
+                    let byte = row[j >> 1];
+                    g += ((byte & 0xF) as i32 - 8) * iq[j] as i32;
+                    g += ((byte >> 4) as i32 - 8) * iq[j + 1] as i32;
+                    j += 2;
+                }
+                if j < end {
+                    let byte = row[j >> 1];
+                    let code = if j & 1 == 1 { (byte >> 4) as i32 } else { (byte & 0xF) as i32 };
+                    g += (code - 8) * iq[j] as i32;
                 }
                 acc += g as f32 * self.scale(r, gi);
             }
