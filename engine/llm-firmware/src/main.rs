@@ -6,8 +6,10 @@
 //! verified against PyTorch and the C reference on the host
 //! (`llm-host`'s golden/ppl/cli parity tests) -- only the platform glue
 //! differs here: partition mmap (`partition.rs`), PSRAM allocation
-//! (`psram.rs`), the dual-core int8-staged head (`head.rs`), and the
-//! embedded vocab decode table (`vocab.rs`).
+//! (`psram.rs`), the dual-core int8-staged head (`head.rs`), the embedded
+//! vocab decode table (`vocab.rs`), and (optional, off by default, see its
+//! own module doc comment) an esp-dsp-backed matvec override
+//! (`matvec_simd.rs`).
 //!
 //! Scope note: this port intentionally does NOT include the C
 //! reference's display support (`USE_DISPLAY`/`display.h`, an ST7789 TFT
@@ -22,12 +24,16 @@
 //! confidence tier.
 
 mod head;
+mod matvec_simd;
 mod partition;
 mod psram;
+mod simd_dot;
 mod vocab;
 
 use esp_idf_svc::hal::sys::esp_timer_get_time;
 use llm_core::{llm_forward_profiled, llm_forward_with_head_override, Model, Profile};
+#[cfg(feature = "matvec-simd")]
+use llm_core::{llm_forward_profiled_with_matvec_override, llm_forward_with_matvec_override};
 use std::io::Write;
 use std::time::Duration;
 
@@ -299,6 +305,20 @@ fn main() {
     // field.
     let mut head_matvec = |x: &[f32], y: &mut [f32]| head.matvec(x, y);
 
+    // `matvec-simd`-only: overrides every non-head matvec with
+    // `matvec_simd::MatvecSimdScratch::run` (esp-dsp-backed with the
+    // feature's own FFI on, scalar `deq_row`+dot fallback otherwise -- see
+    // `matvec_simd.rs`'s module doc comment for what is and isn't verified
+    // about this path, including performance, before trusting it beyond
+    // the plain scalar `matvec_range` path this replaces). Off by default,
+    // same as `head-simd` -- neither feature changes the build without
+    // being explicitly requested.
+    #[cfg(feature = "matvec-simd")]
+    let mut matvec_scratch = matvec_simd::MatvecSimdScratch::default();
+    #[cfg(feature = "matvec-simd")]
+    let mut matvec_override =
+        |t: &llm_core::QT, x: &[f32], y: &mut [f32]| matvec_scratch.run(t, x, y);
+
     let prompt_ids = if STDIN_PROMPT {
         read_prompt_ids()
     } else {
@@ -315,7 +335,17 @@ fn main() {
     for &t in prompt_ids.iter() {
         tok = t;
         emit(tok);
+        #[cfg(not(feature = "matvec-simd"))]
         llm_forward_with_head_override(&model, tok, pos, &mut scratch, &mut head_matvec);
+        #[cfg(feature = "matvec-simd")]
+        llm_forward_with_matvec_override(
+            &model,
+            tok,
+            pos,
+            &mut scratch,
+            &mut head_matvec,
+            &mut matvec_override,
+        );
         pos += 1;
         // The C reference doesn't feed the watchdog here either (see
         // esp32_llm.ino's own prompt-priming loop) -- fine there, because on
@@ -361,12 +391,24 @@ fn main() {
         emit(tok);
 
         let d0 = unsafe { esp_timer_get_time() };
+        #[cfg(not(feature = "matvec-simd"))]
         llm_forward_profiled(
             &model,
             tok,
             pos,
             &mut scratch,
             &mut head_matvec,
+            &mut || unsafe { esp_timer_get_time() as u64 },
+            &mut prof,
+        );
+        #[cfg(feature = "matvec-simd")]
+        llm_forward_profiled_with_matvec_override(
+            &model,
+            tok,
+            pos,
+            &mut scratch,
+            &mut head_matvec,
+            &mut matvec_override,
             &mut || unsafe { esp_timer_get_time() as u64 },
             &mut prof,
         );
