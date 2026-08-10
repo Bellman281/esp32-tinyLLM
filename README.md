@@ -1,6 +1,5 @@
 # esp32-tinyLLM
 
-<https://github.com/Bellman281/esp32-tinyLLM> · Apache License 2.0 (see [LICENSE](./LICENSE))
 
 A ground-up Rust port of the on-device inference engine for the **ESP32-S3
 PLE-TinyLM** — a 28.9M-parameter decoder-only transformer with Gemma-style
