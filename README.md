@@ -1,15 +1,19 @@
-# esp32-Rust
+# esp32-tinyLLM
+
+<https://github.com/Bellman281/esp32-tinyLLM> · Apache License 2.0 (see [LICENSE](./LICENSE))
 
 A ground-up Rust port of the on-device inference engine for the **ESP32-S3
 PLE-TinyLM** — a 28.9M-parameter decoder-only transformer with Gemma-style
 Per-Layer Embeddings (25M of those params live in a flash-mapped lookup
 table), running at ~9.5 tok/s on an $8 chip with 512KB SRAM / 8MB PSRAM /
-16MB flash. The original C/C++ implementation lives in
-[`vendor/esp32-ai`](https://github.com/Bellman281/esp32-ai) (Python
+16MB flash. The original C/C++ implementation lives upstream in
+[slvDev/esp32-ai](https://github.com/slvDev/esp32-ai) (Python
 training/quantization/export + the C inference engine + the Arduino
 firmware); this repo is where the inference engine and the ESP32 platform
 code are being rewritten in Rust, function for function, with every step
 checked against the C version's own output.
+
+Trained model, dataset, and architecture: [`model/`](./model/).
 
 ## Scope
 
@@ -18,8 +22,9 @@ quantized-transformer math, the ESP32 firmware, the host-side correctness
 tooling.
 
 **Out of scope, deliberately:** training, quantization, and model export
-stay exactly where they are, in Python, in `vendor/esp32-ai`. Nothing here
-regenerates `model.bin`, `vocab.h`, or `golden.txt` — they're consumed
+stay exactly where they are, in Python, in
+[`slvDev/esp32-ai`](https://github.com/slvDev/esp32-ai). Nothing
+here regenerates `model.bin`, `vocab.h`, or `golden.txt` — they're consumed
 as-is, produced upstream. See [`MIGRATION_PLAN.md`](./MIGRATION_PLAN.md)
 for the full reasoning and the ground rules this port follows.
 
@@ -67,8 +72,8 @@ were worth:
    `matvec_q_range` unpacks both nibbles of each packed byte in one pass; the
    Rust port called a `code(r, j)` helper per column, re-reading the same byte
    and branching on `j & 1`. Now unrolled the same way, and asserted
-   bit-identical to a naive reference by
-   `llm-core`'s `byte_pair_unroll_matches_naive_bit_for_bit`.
+   bit-identical to a naive reference. (`matvec_int8_activations` had the same
+   gap and got the identical fix — see "Open perf thread" below.)
 3. **The external-memory caches were at ESP-IDF's defaults**, not
    arduino-esp32's: 32KB data cache with a 32-byte line, 16KB instruction
    cache. Doubling all three (48 KB of internal SRAM) took the head from
@@ -83,6 +88,22 @@ sequential, which is why the cache change barely moved it (-9%, against -21%
 for the head). The remaining gap is most likely GCC's Xtensa backend against
 LLVM's on scalar float and integer dot-product loops, and the lever that would
 actually beat it is the S3's SIMD unit, not more flag-tuning.
+
+### Open perf thread: real SIMD for the int8 matvec
+
+`QT::matvec_int8_activations`'s inner loop (`g += self.code(r, j) * iq[j] as
+i32`) is a straight int8×int8→i32 dot product — the exact shape the ESP32-S3's
+128-bit PIE vector unit accelerates via Espressif's `esp-dsp` C library
+(`dsps_dp_s8_aes3`, ~4x on comparable dot products). That's not reachable from
+`core::simd`/`std::simd` here — Xtensa's LLVM backend doesn't autovectorize to
+those instructions, they're only exposed via hand-written assembly or the
+esp-dsp C library. Plan: keep `llm-core` platform-agnostic (per
+`MIGRATION_PLAN.md`) and add this the same way the dual-core head split
+already works — an optional override hook in `llm-firmware` that FFIs into
+`dsps_dp_s8_aes3` per group, falling back to the scalar loop when absent.
+Needs the row's packed nibbles unpacked to contiguous `i8` first (cost worth
+measuring against the MAC savings), and real ESP-IDF hardware to benchmark —
+neither available in this sandbox.
 
 ## Verified parity (Phases 1–2)
 
@@ -120,9 +141,11 @@ detail.
 ## Repo layout
 
 ```
-esp32-Rust/
+esp32-tinyLLM/
   README.md              <- this file
+  LICENSE                  <- Apache License 2.0
   MIGRATION_PLAN.md       <- phase-by-phase plan, ground rules, full detail
+  model/                    <- trained model + dataset docs
   reference-c/             <- frozen, read-only copy of the C/C++ engine
                                (verified against this, never edited)
   data/                     <- validation tokens for the ppl parity test
@@ -146,10 +169,29 @@ No network access is needed beyond the first `cargo build` (`half` and
 that — `engine/llm-firmware` is the part that needs both, and it builds and
 flashes on its own (`cd engine/llm-firmware && cargo run --release`).
 
-## Reviewing this PR
+## Reviewing this repo
 
 The interesting reading, in order: `MIGRATION_PLAN.md` for why the port is
 scoped and sequenced this way, `engine/llm-core/src/tensor.rs` and
 `model.rs` for the actual ported math (cross-reference against
 `reference-c/firmware/common/llm.h`), and `engine/llm-host/tests/` for how
 correctness is actually being enforced rather than assumed.
+
+## References
+
+- [slvDev/esp32-ai](https://github.com/slvDev/esp32-ai) — the
+  upstream Python training/export pipeline + original C/Arduino firmware this
+  repo ports from.
+- Andrej Karpathy's [llama2.c](https://github.com/karpathy/llama2.c) /
+  [llm.c](https://github.com/karpathy/llm.c) — the minimal single-file C
+  inference style `llm.h` and the host tooling follow.
+- TinyStories dataset — Eldan & Li (2023), [arXiv:2305.07759](https://arxiv.org/abs/2305.07759).
+- Per-Layer Embeddings — Google's Gemma 3n on-device architecture.
+
+## License
+
+Apache License 2.0 covers this repo's own code — see [LICENSE](./LICENSE).
+`reference-c/` is a vendored, unmodified copy of
+[slvDev/esp32-ai](https://github.com/slvDev/esp32-ai)'s C/C++/Arduino code
+and keeps its original MIT terms — see
+[`reference-c/LICENSE`](./reference-c/LICENSE).
