@@ -130,15 +130,16 @@ and test tooling reads the same artifacts from their original location:
 ## Try it yourself (host, no ESP32 needed)
 
 This model + tokenizer also run as a plain C program on a laptop — no
-Python ML dependencies, no pip. `reference-c/esp32-llm-lab/` (refreshed to
-include `chat.py`, `run_cli.sh`, `bpe32768.json`, `START-HERE.md` alongside
-the existing `llm.h`/`gen_prompt.c`/`model.bin`/`vocab.h`) builds the exact
-ESP32 inference code and wraps it in a small interactive REPL:
+Python ML dependencies, no pip. [`demo/`](../demo/) builds the exact ESP32
+inference code from `reference-c/esp32-llm-lab/` and wraps it in a small
+interactive REPL:
 
 ```bash
-cd reference-c/esp32-llm-lab
+cd demo
 sh run_cli.sh
 ```
+
+See [`demo/README.md`](../demo/README.md) for a screenshot and more detail.
 
 Verified output from this exact `model.bin` (`:temp 0.8`, the default):
 
