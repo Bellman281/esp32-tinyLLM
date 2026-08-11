@@ -21,6 +21,28 @@ rust-version = "1.82"
 name = "llm-firmware"
 harness = false # do not use the built-in cargo test harness -> resolve rust-analyzer errors
 
+[features]
+default = []
+# Optional esp-dsp-backed SIMD dot product for Head::rows_range, in place
+# of the plain scalar loop. Off by default -- see
+# `src/simd_dot.rs`'s module doc comment for what is and isn't verified
+# about this path (short version: written without ESP-IDF/hardware access
+# to check esp-dsp's real API, needs hand-confirmation before it will even
+# compile). Also needs `esp-dsp` actually linked in -- see the
+# `idf_component.yml` stub next to this file.
+head-simd = []
+# Optional esp-dsp-backed matvec override for every OTHER tensor (qkv,
+# attn_proj, FFN gate/up/down, ple_gate/ple_proj, ple_model_proj) --
+# `head-simd` above only covers the output head. Off by default -- see
+# `src/matvec_simd.rs`'s module doc comment: unlike `head-simd`'s int8 path,
+# this reorders a `f32` accumulation (not associative), so it's held to a
+# measured tolerance (`llm-host/tests/matvec_simd_tolerance.rs`), not an
+# exact-match bar, and its own on-device performance is unproven (small
+# per-row FFI calls, unlike the head's one large one). Independent of
+# `head-simd` -- either, both, or neither can be enabled. Also needs
+# `esp-dsp` linked in, same `idf_component.yml` stub.
+matvec-simd = []
+
 [profile.release]
 opt-level = 3 # the C reference builds with -O3 (arduino-cli compiler.optimization_flags); "s"
               # (the esp-idf-template default, size-optimized) would leave real tok/s on the

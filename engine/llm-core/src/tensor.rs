@@ -169,6 +169,14 @@ impl<'a> QT<'a> {
     /// greedy-decode CLI parity in particular would catch even a single
     /// bit of summation-order drift) -- this is a pure performance
     /// rewrite, not a numerics change.
+    ///
+    /// NOTE ON THIS FUNCTION vs. `matvec_range_chunked` below: this is the
+    /// only fp32-path matvec used by any verified/shipped code. It is NOT
+    /// currently SIMD-accelerated on-device (unlike the head, which has
+    /// its own int8-staged path in `llm-firmware::head`) -- see
+    /// `matvec_range_chunked`'s doc comment for why a real SIMD version of
+    /// *this* function is a harder, riskier change than the head's, and
+    /// what has to be measured before trusting one.
     pub fn matvec_range(&self, x: &[f32], y: &mut [f32], row_begin: usize, row_end: usize) {
         debug_assert!(x.len() >= self.cols);
         for r in row_begin..row_end {
@@ -205,6 +213,69 @@ impl<'a> QT<'a> {
     pub fn matvec(&self, x: &[f32], y: &mut [f32]) {
         let rows = self.rows;
         self.matvec_range(x, y, 0, rows);
+    }
+
+    /// Same math as `matvec_range`, but reduces each group's dot product
+    /// across `LANES` independent parallel accumulators (`j`'s value goes
+    /// into lane `(j - begin) % LANES`) instead of one strictly
+    /// sequential running sum, then combines the `LANES` partial sums at
+    /// the end. This is the reduction *shape* a real SIMD dot-product
+    /// instruction uses (process `LANES` elements per step into `LANES`
+    /// registers, horizontal-sum once at the end) -- NOT a claim that any
+    /// particular `esp-dsp` function reduces in exactly this order, which
+    /// is unverified and can't be confirmed without disassembling it.
+    ///
+    /// Why this function exists at all: `matvec_range`'s accumulation is
+    /// `f32`, and float addition is not associative -- reordering it (as
+    /// any real SIMD dot product necessarily does) can change the result
+    /// in the last bit or two, unlike the head's int8 path where integer
+    /// addition's associativity makes reordering provably lossless. That
+    /// means a real on-device SIMD version of this function is NOT
+    /// expected to match `matvec_range`'s output bit-for-bit -- it needs
+    /// its own tolerance, not the exact-match bar `golden.rs`/
+    /// `cli_parity.rs` hold the scalar path to. This function is how that
+    /// tolerance gets measured, on the host, before any FFI/hardware is
+    /// involved: `llm-host/tests/matvec_simd_tolerance.rs` runs this at a
+    /// couple of `LANES` values against real validation data and checks
+    /// how far the resulting perplexity drifts from the exact
+    /// `matvec_range` reference, the same style `ppl_parity.rs` already
+    /// uses to bound the (also inherently reorder-sensitive)
+    /// int8-activations path.
+    ///
+    /// Not used by any shipped/default code path -- test-only, and
+    /// intentionally not perf-tuned (plain per-element unpack, no
+    /// byte-pair-unroll) since clarity matters more than speed for a
+    /// function whose only job is measuring a numeric property.
+    pub fn matvec_range_chunked<const LANES: usize>(
+        &self,
+        x: &[f32],
+        y: &mut [f32],
+        row_begin: usize,
+        row_end: usize,
+    ) {
+        debug_assert!(x.len() >= self.cols);
+        debug_assert!(LANES > 0, "LANES must be nonzero");
+        for r in row_begin..row_end {
+            let row = &self.codes[r * self.row_bytes..(r + 1) * self.row_bytes];
+            let mut acc = 0f32;
+            for gi in 0..self.n_groups {
+                let begin = gi * self.group;
+                let end = core::cmp::min(begin + self.group, self.cols);
+                let scale = self.scale(r, gi);
+                let mut lanes = [0f32; LANES];
+                for j in begin..end {
+                    let byte = row[j >> 1];
+                    let code = if j & 1 == 1 { (byte >> 4) as i32 } else { (byte & 0xF) as i32 };
+                    lanes[(j - begin) % LANES] += (code - 8) as f32 * x[j];
+                }
+                let mut group_acc = 0f32;
+                for l in lanes.iter() {
+                    group_acc += *l;
+                }
+                acc += group_acc * scale;
+            }
+            y[r] = acc;
+        }
     }
 
     /// Unpacks the int4 codes of row `r` into `out[..self.cols]` as raw

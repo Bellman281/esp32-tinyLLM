@@ -203,6 +203,32 @@ fn matvec(t: &QT, x: &[f32], y: &mut [f32], iq: &mut [i8]) {
     }
 }
 
+/// Dispatches one matvec call: `matvec_override` if given, otherwise the
+/// default `matvec()` above. Every per-tensor matvec call site in
+/// `llm_forward_impl` goes through this instead of calling `matvec()`
+/// directly, so a platform can override *every* matvec (not just the
+/// head's, which already had its own dedicated hook) without
+/// `llm_forward_impl` itself knowing or caring what the override does.
+///
+/// `matvec_override`'s signature deliberately matches the existing `head`
+/// override's (`&[f32] in, &mut [f32] out`, no `iq` parameter) -- an
+/// override is responsible for its own activation handling internally
+/// (quantizing, SIMD-unpacking, whatever), the same way `llm-firmware`'s
+/// `head.rs` already does for the head specifically.
+#[inline]
+fn dispatch_matvec(
+    matvec_override: &mut Option<&mut dyn FnMut(&QT, &[f32], &mut [f32])>,
+    t: &QT,
+    x: &[f32],
+    y: &mut [f32],
+    iq: &mut [i8],
+) {
+    match matvec_override.as_deref_mut() {
+        Some(f) => f(t, x, y),
+        None => matvec(t, x, y, iq),
+    }
+}
+
 /// One decode step: token at position `pos` -> logits (written into
 /// `s.logits`). The KV cache in `s` persists across calls -- caller is
 /// responsible for calling with increasing `pos` values, same contract as
@@ -214,7 +240,7 @@ fn matvec(t: &QT, x: &[f32], y: &mut [f32], iq: &mut [i8]) {
 /// dual-core int8-staged output head (`Model.head_matvec` in the C code),
 /// see `llm_forward_with_head_override` below.
 pub fn llm_forward(model: &Model, token: usize, pos: usize, s: &mut Scratch) {
-    llm_forward_impl(model, token, pos, s, None, None);
+    llm_forward_impl(model, token, pos, s, None, None, None);
 }
 
 /// Same decode step as `llm_forward`, but the final output-head matvec is
@@ -236,7 +262,7 @@ pub fn llm_forward_with_head_override(
     s: &mut Scratch,
     head: &mut dyn FnMut(&[f32], &mut [f32]),
 ) {
-    llm_forward_impl(model, token, pos, s, Some(head), None);
+    llm_forward_impl(model, token, pos, s, Some(head), None, None);
 }
 
 /// Same decode step as `llm_forward_with_head_override`, plus `llm.h`'s
@@ -258,7 +284,60 @@ pub fn llm_forward_profiled(
     now: &mut dyn FnMut() -> u64,
     prof: &mut Profile,
 ) {
-    llm_forward_impl(model, token, pos, s, Some(head), Some((now, prof)));
+    llm_forward_impl(model, token, pos, s, Some(head), None, Some((now, prof)));
+}
+
+/// Same decode step as `llm_forward_profiled`, plus `matvec_override`:
+/// replaces every non-head matvec (`qkv`, `attn_proj`, FFN `gate`/`up`/
+/// `down`, `ple_gate`/`ple_proj`, and the PLE input's `ple_model_proj`)
+/// with the given closure, the same way `head` already replaces just the
+/// output head's. `None` for either override behaves identically to
+/// `llm_forward_profiled`/`llm_forward`.
+///
+/// This is the hook a platform needing SIMD-accelerated matvecs beyond
+/// just the head would use -- e.g. `llm-firmware`'s (currently
+/// unverified, see its own module doc comment) `esp-dsp`-backed path.
+/// Unlike the head override, a `matvec_override` here is NOT expected to
+/// match the default fp32 path bit-for-bit -- see
+/// `QT::matvec_range_chunked`'s doc comment in `tensor.rs` for why
+/// reordering an `f32` accumulation (which any real SIMD dot product
+/// does) is inherently lossy in a way the head's int8 accumulation isn't,
+/// and how that's measured/tolerated instead of assumed away.
+#[allow(clippy::too_many_arguments)]
+pub fn llm_forward_profiled_with_matvec_override(
+    model: &Model,
+    token: usize,
+    pos: usize,
+    s: &mut Scratch,
+    head: &mut dyn FnMut(&[f32], &mut [f32]),
+    matvec_override: &mut dyn FnMut(&QT, &[f32], &mut [f32]),
+    now: &mut dyn FnMut() -> u64,
+    prof: &mut Profile,
+) {
+    llm_forward_impl(
+        model,
+        token,
+        pos,
+        s,
+        Some(head),
+        Some(matvec_override),
+        Some((now, prof)),
+    );
+}
+
+/// Same as `llm_forward_profiled_with_matvec_override`, without profiling
+/// -- for a platform that wants `matvec_override` but not the per-stage
+/// timing breakdown (e.g. a plain generation loop instead of a
+/// measurement run).
+pub fn llm_forward_with_matvec_override(
+    model: &Model,
+    token: usize,
+    pos: usize,
+    s: &mut Scratch,
+    head: &mut dyn FnMut(&[f32], &mut [f32]),
+    matvec_override: &mut dyn FnMut(&QT, &[f32], &mut [f32]),
+) {
+    llm_forward_impl(model, token, pos, s, Some(head), Some(matvec_override), None);
 }
 
 fn llm_forward_impl(
@@ -267,6 +346,7 @@ fn llm_forward_impl(
     pos: usize,
     s: &mut Scratch,
     mut head: Option<&mut dyn FnMut(&[f32], &mut [f32])>,
+    mut matvec_override: Option<&mut dyn FnMut(&QT, &[f32], &mut [f32])>,
     mut prof: Option<(&mut dyn FnMut() -> u64, &mut Profile)>,
 ) {
     // `last_t` tracks the timestamp at the previous stage boundary --
@@ -291,7 +371,7 @@ fn llm_forward_impl(
     model.tok_emb.deq_row(token, s.x);
 
     // ---- per-layer input: (RMSNorm(proj(x)/sqrt(D)) + table[tok]*sqrt(P)) / sqrt(2)
-    matvec(&model.ple_model_proj, s.x, &mut s.tmp_p[..lp], s.iq);
+    dispatch_matvec(&mut matvec_override, &model.ple_model_proj, s.x, &mut s.tmp_p[..lp], s.iq);
     let dscale = 1.0 / libm::sqrtf(d as f32);
     for v in s.tmp_p[..lp].iter_mut() {
         *v *= dscale;
@@ -323,7 +403,7 @@ fn llm_forward_impl(
 
         // ---- attention
         ops::rmsnorm(s.x, layer.attn_norm, d, s.h);
-        matvec(&layer.qkv, s.h, &mut s.qkv[..3 * d], s.iq);
+        dispatch_matvec(&mut matvec_override, &layer.qkv, s.h, &mut s.qkv[..3 * d], s.iq);
         {
             let (q, rest) = s.qkv[..3 * d].split_at_mut(d);
             let (k, v) = rest.split_at_mut(d);
@@ -338,7 +418,7 @@ fn llm_forward_impl(
                 q, k, v, layer_kc, layer_vc, s.att, s.scores, pos, d, h_heads, dh,
             );
         }
-        matvec(&layer.attn_proj, s.att, s.h, s.iq);
+        dispatch_matvec(&mut matvec_override, &layer.attn_proj, s.att, s.h, s.iq);
         for i in 0..d {
             s.x[i] += s.h[i];
         }
@@ -351,12 +431,12 @@ fn llm_forward_impl(
 
         // ---- SwiGLU FFN
         ops::rmsnorm(s.x, layer.ffn_norm, d, s.h);
-        matvec(&layer.gate, s.h, &mut s.g1[..f], s.iq);
-        matvec(&layer.up, s.h, &mut s.g2[..f], s.iq);
+        dispatch_matvec(&mut matvec_override, &layer.gate, s.h, &mut s.g1[..f], s.iq);
+        dispatch_matvec(&mut matvec_override, &layer.up, s.h, &mut s.g2[..f], s.iq);
         for i in 0..f {
             s.g1[i] = ops::silu(s.g1[i]) * s.g2[i];
         }
-        matvec(&layer.down, &s.g1[..f], s.h, s.iq);
+        dispatch_matvec(&mut matvec_override, &layer.down, &s.g1[..f], s.h, s.iq);
         for i in 0..d {
             s.x[i] += s.h[i];
         }
@@ -368,11 +448,11 @@ fn llm_forward_impl(
         }
 
         // ---- PLE gate: x += RMSNorm(ple_proj(gelu(ple_gate(x)) * ple_l))
-        matvec(&layer.ple_gate, s.x, &mut s.g2[..p], s.iq);
+        dispatch_matvec(&mut matvec_override, &layer.ple_gate, s.x, &mut s.g2[..p], s.iq);
         for i in 0..p {
             s.g2[i] = ops::gelu(s.g2[i]) * s.ple[l * p + i];
         }
-        matvec(&layer.ple_proj, &s.g2[..p], s.h, s.iq);
+        dispatch_matvec(&mut matvec_override, &layer.ple_proj, &s.g2[..p], s.h, s.iq);
         ops::rmsnorm_inplace(&mut s.h[..d], layer.ple_norm, d);
         for i in 0..d {
             s.x[i] += s.h[i];
@@ -388,7 +468,7 @@ fn llm_forward_impl(
     ops::rmsnorm_inplace(s.x, model.out_norm, d);
     match head.as_deref_mut() {
         Some(f) => f(s.x, s.logits),
-        None => matvec(&model.tok_emb, s.x, s.logits, s.iq),
+        None => dispatch_matvec(&mut matvec_override, &model.tok_emb, s.x, s.logits, s.iq),
     }
 
     if let Some((now, p)) = prof.as_mut() {

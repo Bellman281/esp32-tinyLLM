@@ -1,4 +1,21 @@
 //! Elementwise ops. Ports `rmsnorm`, `gelu`, `silu` from llm.h, verbatim.
+//!
+//! PERFORMANCE NOTE: `rms_inv`/`rmsnorm`/`rmsnorm_inplace` used raw `usize`
+//! indexing (`x[i]`, `out[i]`, `buf[i]`) until this fix -- same category of
+//! needless per-element overhead `tensor.rs`'s `matvec_range` and
+//! `attention.rs`'s dot-product loops were found to have (see their own
+//! doc comments). Slicing `x[..n]`/`out[..n]`/`buf[..n]` down to a common,
+//! provable length before iterating (`quantize_activations` in `tensor.rs`
+//! already does this for its own single-slice loop) lets the backend
+//! elide bounds checks it otherwise has to re-derive from the separately
+//! passed `n: usize` on every element. `FVec::get(i)` itself still needs
+//! an explicit index (it's not slice-backed), so these loops keep an
+//! `.enumerate()` for it rather than a pure `.zip()` -- that call's own
+//! four-byte-at-a-time indexing is a separate, smaller, not-yet-addressed
+//! cost (see `tensor.rs`'s `FVec::get` doc comment). Same left-to-right
+//! summation order as before in every loop below, so this is a pure
+//! loop-shape change, not a numerics change -- verified via `llm-host`'s
+//! golden/ppl/cli parity tests.
 
 use crate::tensor::FVec;
 
@@ -7,8 +24,8 @@ const RMS_EPS: f32 = 1e-6;
 #[inline]
 fn rms_inv(x: &[f32], n: usize) -> f32 {
     let mut ss = 0f32;
-    for i in 0..n {
-        ss += x[i] * x[i];
+    for &v in &x[..n] {
+        ss += v * v;
     }
     1.0 / libm::sqrtf(ss / n as f32 + RMS_EPS)
 }
@@ -18,8 +35,8 @@ fn rms_inv(x: &[f32], n: usize) -> f32 {
 /// out` (e.g. `rmsnorm(s->x, attn_norm, D, s->h)`).
 pub fn rmsnorm(x: &[f32], w: FVec, n: usize, out: &mut [f32]) {
     let inv = rms_inv(x, n);
-    for i in 0..n {
-        out[i] = w.get(i) * x[i] * inv;
+    for (i, (&xv, ov)) in x[..n].iter().zip(out[..n].iter_mut()).enumerate() {
+        *ov = w.get(i) * xv * inv;
     }
 }
 
@@ -30,8 +47,8 @@ pub fn rmsnorm(x: &[f32], w: FVec, n: usize, out: &mut [f32]) {
 /// arithmetic, same result.
 pub fn rmsnorm_inplace(buf: &mut [f32], w: FVec, n: usize) {
     let inv = rms_inv(buf, n);
-    for i in 0..n {
-        buf[i] = w.get(i) * buf[i] * inv;
+    for (i, bv) in buf[..n].iter_mut().enumerate() {
+        *bv = w.get(i) * *bv * inv;
     }
 }
 
