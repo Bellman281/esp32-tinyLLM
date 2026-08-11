@@ -7,15 +7,24 @@ already-verified, platform-independent inference engine) plus
 flash partition mmap, PSRAM allocation, and the dual-core int8-staged output
 head.
 
-## Status: **builds clean against the real Xtensa/ESP-IDF toolchain**
+## Status: **runs on real hardware**
 
-`cargo build` (dev profile) succeeds on the project's own dev machine (the
-only place with `espup`/ESP-IDF actually installed — this can't be compiled
-anywhere the cloud-sandbox/Claude side of this project has execution access,
-see below). Every FFI guess this port made — the bindgen-mangled partition
-enum constants, `esp_idf_hal::task`'s API, the `sdkconfig.defaults` keys —
-turned out correct on the first real attempt, after fixing two
-build-plumbing issues that had nothing to do with the ported logic itself:
+Built with `cargo run --release`, flashed to an ESP32-S3-DevKitC (N16R8),
+and generating 400 tokens of correct text with no watchdog trips. The
+strongest result: at matched settings on the same board and the same
+`model.bin`, this firmware's output is **byte-identical to the C
+firmware's** — the same 400 tokens, cut off at the same word. Two
+independent implementations of the same math, including the dual-core
+int8-staged head, agreeing token for token on real silicon.
+
+Measured throughput and the full per-stage C-vs-Rust breakdown live in
+[`BENCHMARKING.md`](../../BENCHMARKING.md); they are deliberately not
+duplicated here.
+
+Every FFI guess this port made — the bindgen-mangled partition enum
+constants, `esp_idf_hal::task`'s API, the `sdkconfig.defaults` keys — turned
+out correct on the first real attempt, after fixing two build-plumbing
+issues that had nothing to do with the ported logic itself:
 
 1. `llm-firmware` needed an empty `[workspace]` table in its own `Cargo.toml`
    to opt out of `engine/Cargo.toml`'s workspace (Cargo doesn't auto-detect
@@ -29,19 +38,14 @@ build-plumbing issues that had nothing to do with the ported logic itself:
    table at flash time instead (`.cargo/config.toml`'s `runner` now does
    `espflash flash --partition-table partitions.csv --monitor`).
 
-**Not yet done:** a release-profile build (`cargo build --release` — the
-profile the ms/token measurement in `main.rs` actually depends on), and
-anything involving real hardware (no board is attached to this project yet
--- see "What's next" below).
+### How this was written before it could be compiled
 
-Before those two fixes, this crate couldn't be compiled or run in any
-environment available to whoever (human or Claude) was writing the original
-port from the cloud sandbox side: the Xtensa/ESP-IDF toolchain isn't
-installable there (no access to the GitHub-hosted release assets `espup`
-needs), and there's no other execution environment with `cargo`/`rustc` at
-all, let alone the ESP-IDF C SDK. Given that constraint, the original port
-was written and checked as rigorously as possible without a target build,
-before ever reaching a real compiler:
+For most of its life this crate could not be built or run anywhere the port
+was being written: the Xtensa/ESP-IDF toolchain was not installable in that
+environment, and there was no other machine with `cargo`/`rustc` available,
+let alone the ESP-IDF C SDK. That constraint is why the source carries so
+many `VERIFICATION STATUS` doc comments, and it is worth keeping the record
+of how the code was checked before it ever reached a real compiler:
 
 - Every module's tensor/numerics logic reuses functions `llm-host`'s
   existing test suite already verified bit-for-bit against the C reference
@@ -69,21 +73,23 @@ before ever reaching a real compiler:
 
 ### What's next
 
-1. `cargo build --release` from this directory — same code, the profile
-   that actually matters for the tok/s comparison (`opt-level = 3`, matching
-   the C reference's `-O3`). Should also build clean; if it doesn't, that's
-   new information the dev-profile build didn't surface.
-2. Once there's an ESP32-S3 board to flash (none is attached to this
-   project yet): `cargo run` (or `espflash flash --partition-table
-   partitions.csv --monitor` directly) against a board with the `model`
-   partition programmed, then compare boot diagnostics + measured tok/s
-   against `reference-c/firmware/esp32_llm/README.md`'s numbers (102.9
-   ms/step, 9.72 tok/s compute-only) — should match within noise. This is
-   the real exit gate for Phase 3; everything above it is necessary but not
-   sufficient.
+Phase 3's exit gate is met — it builds, flashes, runs, and matches the C
+firmware's output exactly. Remaining work on this crate:
 
-Only after hardware confirms working should Phase 4 (`llm-display`) start —
-it builds directly on this crate.
+1. **A clean A/B on `llm-core`'s `matvec_override` hook.** It adds a branch
+   to every matvec call and currently has no user here (the `esp-dsp` path
+   it exists for is not written). Its cost looks like roughly 2 ms/token,
+   but that has not been isolated by a before/after on one build. Worth
+   measuring before anyone optimizes around it.
+2. **esp-dsp SIMD for the fp32 matvec.** The hook, `QT::matvec_range_chunked`,
+   and a measured drift tolerance all ship in `llm-core`; what is missing is
+   the ESP-IDF-side work. See `BENCHMARKING.md`'s "What to optimize next"
+   for the full picture, including why this is not a guaranteed win.
+3. **Phase 4 (`llm-display`)** can start whenever — it builds directly on
+   this crate, and hardware has now confirmed the foundation works.
+
+Running it: `cargo run --release` from this directory, against a board whose
+`model` partition is programmed (see `BENCHMARKING.md`).
 
 ## What's ported here (and what isn't yet)
 
@@ -95,7 +101,7 @@ it builds directly on this crate.
 | `vocab.h`'s `VOCAB_BLOB`/`VOCAB_OFF`/`VOCAB_N`, `emit()`'s token lookup | `vocab.rs` (embeds `assets/vocab_blob.bin`/`vocab_off.bin`, generated from the real `vocab.h` by `llm-host`'s `vocab-to-bin` tool and round-trip-verified — see that tool's own doc comment) |
 | `setup()`'s boot sequence, prompt priming, greedy-decode loop, throughput printout | `main.rs` |
 | `Serial.begin/write` (non-blocking, `availableForWrite()`-gated) | `main.rs`'s `emit()` — **simplified**: always blocks on the write for now. The non-blocking guard exists in C so generation doesn't stall when no USB host is attached (relevant once a display is running standalone); revisiting this is bundled with Phase 4 since that's when "no attached host" becomes a real scenario. |
-| `#ifdef LLM_PROFILE` per-stage timing (`input_us`/`attn_us`/`ffn_us`/`ple_us`/`head_us`) | **not ported** — `llm-core`'s `Scratch` doesn't carry this instrumentation (see `llm-core/src/scratch.rs`). Overall throughput/ms-per-token *is* still measured and printed, via wall-clock timing in `main.rs`'s decode loop, which needs no change inside `llm-core` to work. Could be added to `llm-core` later if the finer breakdown turns out to matter for on-device tuning. |
+| `#ifdef LLM_PROFILE` per-stage timing (`input_us`/`attn_us`/`ffn_us`/`ple_us`/`head_us`) | `llm-core`'s `Profile` + `llm_forward_profiled`, printed by `main.rs` as `profile ms/token: input .. \| attn .. \| ffn .. \| ple .. \| head ..` — the same stage boundaries and the same output format the C reference uses, so the two can be compared line for line. The timestamp source is a caller-supplied closure rather than a baked-in clock, keeping `llm-core` platform-agnostic (see `llm-core/src/profile.rs`). |
 | `USE_DISPLAY`/`display.h` (ST7789 TFT), `blink()` (RGB status LED) | **deferred to Phase 4** (`llm-display`), per this project's migration plan — this binary is serial-output-only, same as the C reference with `USE_DISPLAY` set to 0. |
 
 ## Phase 6 (later, separate): re-platform onto esp-hal, no_std, no FreeRTOS
