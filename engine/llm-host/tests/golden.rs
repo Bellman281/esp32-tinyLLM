@@ -20,20 +20,29 @@ use llm_core::{llm_forward, Model};
 use llm_host::support::ScratchOwned;
 use std::fs;
 
-const MODEL_BIN: &str = "../../reference-c/firmware/model/model.bin";
-const GOLDEN_TXT: &str = "../../reference-c/firmware/model/golden.txt";
+/// This test deliberately does NOT use the registry's default model. It is
+/// the only direct PyTorch parity gate in the project, and a golden-logit
+/// check needs a `golden.txt` — which exists only for this smaller fixture
+/// model, not for the 28.9M-param model everything else uses. Named
+/// explicitly (rather than read from `default`) so that pointing `default`
+/// at a new model can never silently move this check onto a model that has
+/// no golden reference. See `model/models.toml`.
+const FIXTURE_MODEL: &str = "golden-v4096";
+
 #[cfg(not(feature = "int8-activations"))]
 const TOLERANCE: f32 = 0.02;
 
 #[test]
 #[cfg(not(feature = "int8-activations"))]
 fn golden_logits_match_pytorch() {
-    let bytes = fs::read(MODEL_BIN)
-        .unwrap_or_else(|e| panic!("read {MODEL_BIN}: {e} (run from llm-host/)"));
+    let fixture = llm_host::manifest::model(FIXTURE_MODEL);
+    let (bin, gold) = (fixture.bin_path(), fixture.golden_path());
+    let bytes = fs::read(&bin)
+        .unwrap_or_else(|e| panic!("read {}: {e} (run from llm-host/)", bin.display()));
     let model = Model::load(&bytes).expect("model.bin should parse (bad magic?)");
 
-    let gold_text = fs::read_to_string(GOLDEN_TXT)
-        .unwrap_or_else(|e| panic!("read {GOLDEN_TXT}: {e}"));
+    let gold_text = fs::read_to_string(&gold)
+        .unwrap_or_else(|e| panic!("read {}: {e}", gold.display()));
     let mut lines = gold_text.lines();
 
     let plen: usize = lines
@@ -114,12 +123,14 @@ fn golden_logits_int8_activations_matches_c_int8_numerics() {
     const C_INT8_RMS: f64 = 0.029788;
     const NOISE_TOLERANCE: f32 = 0.001;
 
-    let bytes = fs::read(MODEL_BIN)
-        .unwrap_or_else(|e| panic!("read {MODEL_BIN}: {e} (run from llm-host/)"));
+    let fixture = llm_host::manifest::model(FIXTURE_MODEL);
+    let (bin, gold) = (fixture.bin_path(), fixture.golden_path());
+    let bytes = fs::read(&bin)
+        .unwrap_or_else(|e| panic!("read {}: {e} (run from llm-host/)", bin.display()));
     let model = Model::load(&bytes).expect("model.bin should parse (bad magic?)");
 
-    let gold_text = fs::read_to_string(GOLDEN_TXT)
-        .unwrap_or_else(|e| panic!("read {GOLDEN_TXT}: {e}"));
+    let gold_text = fs::read_to_string(&gold)
+        .unwrap_or_else(|e| panic!("read {}: {e}", gold.display()));
     let mut lines = gold_text.lines();
     let plen: usize = lines.next().unwrap().trim().parse().unwrap();
     let prompt: Vec<usize> = lines

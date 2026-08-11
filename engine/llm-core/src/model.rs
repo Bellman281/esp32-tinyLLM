@@ -295,8 +295,14 @@ pub fn llm_forward_profiled(
 /// `llm_forward_profiled`/`llm_forward`.
 ///
 /// This is the hook a platform needing SIMD-accelerated matvecs beyond
-/// just the head would use -- e.g. `llm-firmware`'s (currently
-/// unverified, see its own module doc comment) `esp-dsp`-backed path.
+/// just the head would use -- e.g. an `esp-dsp`-backed path in
+/// `llm-firmware`, on the ESP32-S3's 128-bit PIE vector unit. No such
+/// path ships today: this hook, `QT::matvec_range_chunked`, and
+/// `llm-host/tests/matvec_simd_tolerance.rs` are the scaffolding for
+/// writing one (the hard part -- knowing how much numeric drift to
+/// accept -- is already measured), not an implementation of one. See the
+/// `BENCHMARKING.md`'s "What to optimize next".
+///
 /// Unlike the head override, a `matvec_override` here is NOT expected to
 /// match the default fp32 path bit-for-bit -- see
 /// `QT::matvec_range_chunked`'s doc comment in `tensor.rs` for why

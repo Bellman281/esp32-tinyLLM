@@ -2,11 +2,17 @@
 
 This folder bundles the trained weights and their supporting artifacts in one
 documented place, so you don't have to go spelunking through `reference-c/`
-to find them. It's a copy for reference and convenience — the artifacts
-themselves are produced upstream (see "Where this comes from" below), and
-the copies actually consumed by the build still live where the rest of this
-repo expects them (`reference-c/esp32-llm-lab/`, `data/`); nothing here is
-wired into the Rust build.
+to find them. The weight/vocab/token files here are a copy for reference and
+convenience — the artifacts themselves are produced upstream (see "Where this
+comes from" below), and the copies actually consumed by the build still live
+where the rest of this repo expects them (`reference-c/esp32-llm-lab/`,
+`data/`).
+
+The one file here that **is** wired into the build is
+[`models.toml`](./models.toml), the model registry — every parity test and
+both languages' tooling read their paths and expected values from it. See
+"Where it's actually used from" below and the top-level README's "The model
+registry".
 
 **This is the model**: `model.bin` here is `reference-c/esp32-llm-lab/model.bin`
 (14.91 MB) — the 28.9M-parameter, 32,768-vocab PLE TinyLM that the top-level
@@ -22,6 +28,7 @@ that smaller file instead. See "A real inconsistency in this repo" below.
 | `model.bin` | The trained, quantized model weights. Group-128 ragged int4 weights + fp16 group scales, tied input/output embedding. Config `V=32768 D=96 L=6 H=4 F=66 P=128 seq_len=512 group=128`, parsed directly from the file header. 14.91 MB. |
 | `vocab.h` | The tokenizer's token-id → UTF-8 bytes table, 32,768 entries — matches this `model.bin`'s vocab size. Generated data, not logic. |
 | `val_v32768.bin` | A stream of validation tokens (vocab size 32,768) used to compute cross-entropy/perplexity in the `ppl` parity tests (`engine/llm-host/tests/ppl_parity.rs`), which load this exact model. |
+| `models.toml` | **The model registry** — the single place naming which model files exist, where they live, and what each is expected to produce. Read by Rust (`llm_host::manifest`) and by the C-side tooling (`scripts/model.sh`), so both get their paths, prompt ids, window counts, and expected cross-entropy from one source. See the top-level README's "The model registry". |
 
 SHA-256 of the `model.bin` in this folder:
 
@@ -118,14 +125,25 @@ is in `reference-c/esp32-llm-lab/README.md`.
 
 ## Where it's actually used from
 
-This `model/` folder is a single, documented copy for reference — the build
-and test tooling reads the same artifacts from their original location:
+Nothing reads these copies directly. Every consumer goes through
+[`models.toml`](./models.toml), which points at the artifacts in their
+original locations:
 
-- `reference-c/esp32-llm-lab/model.bin` and `vocab.h` — the frozen,
-  read-only C reference copy (never hand-edited; refreshed from upstream if
-  the model changes). `cli_parity.rs` reads directly from here.
-- `data/val_v32768.bin` — read directly by `engine/llm-host`'s perplexity
-  parity test (`ppl_parity.rs`), which also loads `esp32-llm-lab/model.bin`.
+- `reference-c/esp32-llm-lab/model.bin` and `vocab.h` — the C reference
+  copy, refreshed wholesale from upstream if the model changes. Registered
+  as `tinystories-v32768`'s `bin` and `vocab`.
+- `data/val_v32768.bin` — the perplexity parity test's validation tokens.
+  Registered as `val_tokens`.
+- `reference-c/firmware/model/model.bin` and `golden.txt` — the smaller
+  fixture model, registered separately as `golden-v4096` because it is the
+  only one with a PyTorch golden-logit reference (see the inconsistency
+  note above). `golden.rs` names it explicitly rather than following
+  `default`, so repointing `default` at a new model can't silently move
+  that check onto a model with no golden file.
+
+So changing where a file lives means editing `models.toml`, not hunting
+through test files for hardcoded paths — which is exactly what it exists
+to prevent.
 
 ## Try it yourself (host, no ESP32 needed)
 
@@ -160,16 +178,27 @@ above).
 
 ## Measured performance (real hardware)
 
-Per `reference-c/firmware/esp32_llm/README.md`'s recorded boot diagnostics
-(config matches this folder's model, per the note above):
+**The timing numbers live in [BENCHMARKING.md](../BENCHMARKING.md)** —
+that is the single place they are maintained (the README carries a summary
+table pointing there). They are
+deliberately not repeated here; having them in two files is how the two
+copies ended up disagreeing.
+
+For the record, what this model actually prints when the C firmware boots
+on an ESP32-S3-DevKitC N16R8 — captured from a real run on that board,
+not quoted from upstream:
 
 ```
-model: V=32768 D=96 L=6 H=4 F=66 P=128
-head staged int8: 2.53 MB
-PSRAM free after alloc: ~5100 KB
+=== ESP32-S3 PLE TinyLM ===
+model: V=32768 D=96 L=6 H=4 F=66 P=128  (mapped 15.6 MB)
+head staged int8: 2.54 MB
+PSRAM free after alloc: 3141 KB
 ```
 
-102.9 ms/model-step (9.72 tok/s compute-only); ~9.5 tok/s including serial
-output. Per-stage breakdown: 57.6ms output head, 25.6ms attention, 8.5ms
-PLE path, 6.9ms FFN, 4.4ms input. See the top-level README's status table
-for how the Rust port's own measurements compare.
+An earlier version of this section instead quoted
+`reference-c/firmware/esp32_llm/README.md`'s recorded diagnostics
+(`2.53 MB` staged, `~5100 KB` free) alongside its 102.9 ms/step figure.
+Those were upstream's own measurements, and the PSRAM figure in particular
+does not reproduce here — this build has roughly 2 MB less free after
+allocation. Treat upstream's recorded numbers as historical rather than as
+something to check a fresh build against.

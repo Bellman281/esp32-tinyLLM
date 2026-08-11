@@ -1,9 +1,8 @@
-# reference-c/ — frozen ground truth, read-only
+# reference-c/ — the C/C++ ground truth this port is checked against
 
-Verbatim copy of the C/C++ inference engine and ESP32 firmware from
+Copy of the C/C++ inference engine and ESP32 firmware from
 [slvDev/esp32-ai](https://github.com/slvDev/esp32-ai), taken 2026-08-02.
-This folder is never hand-edited during the Rust port. It exists for two
-reasons:
+It exists for two reasons:
 
 1. Every phase of the port is checked against it (same inputs, same outputs).
 2. It's self-contained here so the whole migration workspace — old and new —
@@ -11,11 +10,43 @@ reasons:
 
 The real source of truth remains `slvDev/esp32-ai`. If that project changes
 (model retrained, vocab changed, format tweaked), refresh this folder from
-there — do not hand-edit files here to "fix" something; that means the
-Rust port's target moved, not that this copy is wrong. Adding files that
-are genuinely part of the upstream bundle but were missing from an earlier
-copy (as happened with `esp32-llm-lab/chat.py` and friends, see below) counts
-as a refresh, not a hand-edit.
+there — do not hand-edit files here to "fix" inference behaviour; that
+would mean the Rust port's target moved, not that this copy is wrong.
+
+**Inference logic is never edited here** — `llm.h` in particular is
+untouched, and the parity tests would catch it if it weren't. Two narrower
+categories of change are allowed, and both have happened; every instance is
+recorded under "Local changes vs. upstream" below:
+
+- Adding files that are genuinely part of the upstream bundle but were
+  missing from an earlier copy (as happened with `esp32-llm-lab/chat.py`
+  and friends). That counts as a refresh, not a hand-edit.
+- Build and benchmark configuration needed to compile this firmware at all,
+  and to make its measurements comparable to the Rust ones — toggles and
+  constants the sketch already exposes for that purpose, never the math.
+
+## Local changes vs. upstream
+
+Four changes, all made 2026-08-10 to get the C firmware building and to
+produce a benchmark directly comparable to `engine/llm-firmware`'s. None
+touch inference math.
+
+| Change | Why |
+|---|---|
+| **added** `firmware/esp32_llm/vocab.h` (copy of `esp32-llm-lab/vocab.h`) | `esp32_llm.ino` does `#include "vocab.h"`, but the file only existed in the sibling `esp32-llm-lab/` bundle, so the build failed outright. Byte-for-byte identical copy. |
+| `esp32_llm.ino`: `#define USE_DISPLAY 1` → `0` | The sketch's own documented "run serial-only, no panel needed" mode. `display.h` needs `Adafruit_GFX.h`, which isn't vendored, so `1` fails to compile. Also matches `engine/llm-firmware`'s scope, which is deliberately serial-only (the display is Phase 4). |
+| `esp32_llm.ino`: `PROMPT_IDS` 4 tokens → 18 | Match `llm-firmware`'s `DEFAULT_PROMPT_IDS` exactly. |
+| `esp32_llm.ino`: `N_GENERATE` 200 → 400 | Match `llm-firmware`'s `N_GENERATE`. |
+
+Those last two matter far more than they look. `attn` is the only stage
+whose cost scales with sequence position, so comparing C at 200 tokens /
+4-token prompt against Rust at 400 / 18 inflates Rust's apparent attention
+ratio by roughly 1.6x purely from run length. See
+[BENCHMARKING.md](../BENCHMARKING.md)'s "Why matched settings matter" for
+the C-vs-C measurement that isolates this.
+
+To restore stock upstream behaviour: revert those lines (`git log
+--oneline -- reference-c/`), or re-copy the folder from `slvDev/esp32-ai`.
 
 ## Two different `model.bin` files here — don't mix them up
 
@@ -41,7 +72,7 @@ as a refresh, not a hand-edit.
 | `esp32-llm-lab/llm.h` = `firmware/common/llm.h` | Portable inference engine: binary model parser, int4/int8 matvec kernels, rmsnorm/gelu/silu, RoPE, causal attention + KV cache, SwiGLU FFN, PLE gate, `llm_forward()` | `engine/llm-core` |
 | `esp32-llm-lab/gen_prompt.c` | CLI: prompt token ids -> generated text, greedy or top-k+temperature | `engine/llm-host` (`gen-prompt` binary) |
 | `esp32-llm-lab/host_generate.c` | CLI: greedy-only smoke test | `engine/llm-host` (`host-generate` binary) |
-| `esp32-llm-lab/vocab.h` | Generated data table (token id -> UTF-8 bytes). Not logic — consumed as-is. | data dependency of `engine/llm-host` and `engine/llm-firmware`, not ported |
+| `esp32-llm-lab/vocab.h` = `firmware/esp32_llm/vocab.h` | Generated data table (token id -> UTF-8 bytes). Not logic — consumed as-is. The second path is a local copy the sketch needs to build (see "Local changes" above). | data dependency of `engine/llm-host` and `engine/llm-firmware`, not ported |
 | `esp32-llm-lab/model.bin`, `firmware/model/model.bin` | Trained, quantized model weights (Python-produced, untouched) — **two different models, see above** | data dependency, not ported |
 | `firmware/model/golden.txt`, `golden.npz` | PyTorch reference logits for a fixed prompt — paired with `firmware/model/model.bin` (the small model), not `esp32-llm-lab/model.bin` | test fixture for `engine/llm-host`'s golden-logit test |
 | `firmware/host_verify/verify.c` | Host correctness gate: compares C's logits to golden.txt | `engine/llm-host` golden-logit test (Phase 2) |

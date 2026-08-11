@@ -14,13 +14,13 @@
 
 // Set to 1 once a GMT020-02-7P (2.0" 240x320 ST7789) is wired up — see display.h.
 // Leave 0 to run serial-only (no panel needed).
-#define USE_DISPLAY 1
+#define USE_DISPLAY 0
 #if USE_DISPLAY
 #include "display.h"
 #endif
 
-static const int PROMPT_IDS[] = {433, 447, 259, 405}; // "Once upon a time"
-static const int N_GENERATE = 200;
+static const int PROMPT_IDS[] = {433, 447, 259, 405, 12, 406, 282, 259, 403, 450, 591, 504, 309, 1719, 265, 309, 1512, 1222};
+static const int N_GENERATE = 400;
 
 // Emit one token to every active output (serial always; TFT when enabled).
 static void emit(int tok) {

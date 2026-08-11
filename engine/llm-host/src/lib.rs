@@ -2,5 +2,6 @@
 //! binaries and the golden-logit parity test. Not part of the portable
 //! model math -- see `llm_core` for that.
 
+pub mod manifest;
 pub mod support;
 pub mod vocab;

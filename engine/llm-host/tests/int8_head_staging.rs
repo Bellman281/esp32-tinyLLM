@@ -14,12 +14,13 @@
 use llm_core::Model;
 use std::fs;
 
-const MODEL_BIN: &str = "../../reference-c/firmware/model/model.bin";
-
 #[test]
 fn unpack_row_int8_matches_deq_row() {
-    let bytes =
-        fs::read(MODEL_BIN).unwrap_or_else(|e| panic!("read {MODEL_BIN}: {e} (run from llm-host/)"));
+    let bytes = {
+        let bin = llm_host::manifest::default_model().bin_path();
+        fs::read(&bin)
+            .unwrap_or_else(|e| panic!("read {}: {e} (run from llm-host/)", bin.display()))
+    };
     let model = Model::load(&bytes).expect("model.bin should parse");
     let tok_emb = model.tok_emb();
     assert_eq!(
@@ -56,8 +57,11 @@ fn tok_emb_rows_can_be_capped_independently_of_the_model() {
     // entry and are never scored, so llm-firmware caps its own copy of
     // tok_emb before staging it, without touching the Model used for the
     // rest of the forward pass.
-    let bytes =
-        fs::read(MODEL_BIN).unwrap_or_else(|e| panic!("read {MODEL_BIN}: {e} (run from llm-host/)"));
+    let bytes = {
+        let bin = llm_host::manifest::default_model().bin_path();
+        fs::read(&bin)
+            .unwrap_or_else(|e| panic!("read {}: {e} (run from llm-host/)", bin.display()))
+    };
     let model = Model::load(&bytes).expect("model.bin should parse");
     let full_rows = model.tok_emb().rows;
     assert!(full_rows > 1, "sanity: test model should have more than one vocab row");

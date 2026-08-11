@@ -26,32 +26,38 @@
 #![cfg(not(feature = "int8-activations"))]
 
 use llm_core::{llm_forward, llm_forward_with_matvec_override, Model, QT};
+use llm_host::manifest;
 use llm_host::support::ScratchOwned;
 use std::fs;
 
-const MODEL_BIN: &str = "../../reference-c/esp32-llm-lab/model.bin";
-const VAL_BIN: &str = "../../data/val_v32768.bin";
-const WINDOWS: usize = 4;
-
-fn load_fixtures() -> (Model<'static>, Vec<u16>) {
-    let bytes: &'static [u8] = fs::read(MODEL_BIN)
-        .unwrap_or_else(|e| panic!("read {MODEL_BIN}: {e} (run from llm-host/)"))
+/// Same registry-driven fixture loading as `ppl_parity.rs` -- this test
+/// measures drift against that same validation set and window count, so
+/// reading both from `model/models.toml` keeps the two in step.
+fn load_fixtures() -> (Model<'static>, Vec<u16>, usize) {
+    let entry = manifest::default_model();
+    let bin = entry.bin_path();
+    let bytes: &'static [u8] = fs::read(&bin)
+        .unwrap_or_else(|e| panic!("read {}: {e} (run from llm-host/)", bin.display()))
         .leak();
     let model = Model::load(bytes).expect("model.bin should parse");
-    let val_bytes =
-        fs::read(VAL_BIN).unwrap_or_else(|e| panic!("read {VAL_BIN}: {e} (run from llm-host/)"));
+    let valp = entry.val_tokens_path();
+    let val_bytes = fs::read(&valp)
+        .unwrap_or_else(|e| panic!("read {}: {e} (run from llm-host/)", valp.display()));
     let val: Vec<u16> = val_bytes
         .chunks_exact(2)
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
-    (model, val)
+    let windows = entry
+        .ppl_windows
+        .expect("default model needs `ppl_windows` in model/models.toml");
+    (model, val, windows)
 }
 
 /// Same cross-entropy computation as `ppl_parity.rs`'s `mean_ce`, but always
 /// runs the plain (non-overridden) forward pass -- the exact `matvec_range`
 /// reference this file measures divergence *from*, not against a captured
 /// C-reference constant.
-fn mean_ce_exact(model: &Model, val: &[u16]) -> f64 {
+fn mean_ce_exact(model: &Model, val: &[u16], windows: usize) -> f64 {
     let mut owned = ScratchOwned::new(&model.cfg);
     let mut s = owned.as_scratch();
     let seq = model.cfg.seq_len;
@@ -59,7 +65,7 @@ fn mean_ce_exact(model: &Model, val: &[u16]) -> f64 {
 
     let mut nll = 0f64;
     let mut count = 0u64;
-    for w in 0..WINDOWS {
+    for w in 0..windows {
         let base = w * seq;
         if base + seq + 1 > val.len() {
             break;
@@ -83,7 +89,7 @@ fn mean_ce_exact(model: &Model, val: &[u16]) -> f64 {
 /// chunked matvec against `model.tok_emb()`, to get a full-model divergence
 /// measurement rather than one that silently leaves the head on the exact
 /// path.
-fn mean_ce_chunked<const LANES: usize>(model: &Model, val: &[u16]) -> f64 {
+fn mean_ce_chunked<const LANES: usize>(model: &Model, val: &[u16], windows: usize) -> f64 {
     let mut owned = ScratchOwned::new(&model.cfg);
     let mut s = owned.as_scratch();
     let seq = model.cfg.seq_len;
@@ -101,7 +107,7 @@ fn mean_ce_chunked<const LANES: usize>(model: &Model, val: &[u16]) -> f64 {
 
     let mut nll = 0f64;
     let mut count = 0u64;
-    for w in 0..WINDOWS {
+    for w in 0..windows {
         let base = w * seq;
         if base + seq + 1 > val.len() {
             break;
@@ -124,33 +130,41 @@ fn mean_ce_chunked<const LANES: usize>(model: &Model, val: &[u16]) -> f64 {
     nll / count as f64
 }
 
-/// Same idea as `mean_ce_chunked`, but exercises the actual algorithm
-/// `llm-firmware`'s (draft, unverified-on-hardware) `matvec_simd.rs` uses:
-/// dequantize each row whole via the public `QT::deq_row` (scale already
-/// folded into each element), then one whole-row dot product against `x`,
-/// instead of `matvec_range`'s per-group accumulate-then-scale. This is a
-/// DIFFERENT reordering of the same underlying sum than
-/// `matvec_range_chunked`'s per-group lanes -- see `matvec_simd.rs`'s
-/// module doc comment for why that file reuses `deq_row` (only public API
-/// `QT` exposes) instead of a lane-chunked approach, and why this
-/// measurement matters on its own rather than assuming
-/// `matvec_range_chunked`'s bound transfers.
-fn mean_ce_deqrow_dot(model: &Model, val: &[u16]) -> f64 {
+/// Same idea as `mean_ce_chunked`, but exercises the other shape an
+/// on-device implementation is likely to take: dequantize each row whole
+/// via the public `QT::deq_row` (scale already folded into each element),
+/// then one whole-row dot product against `x`, instead of
+/// `matvec_range`'s per-group accumulate-then-scale.
+///
+/// Why this shape is worth measuring separately: `QT`'s packed nibbles and
+/// per-group scales are crate-private (`codes`/`scales`/`code()`/`scale()`
+/// are not public), so a `llm-firmware`-side implementation has only
+/// `deq_row` to work with unless `llm-core`'s private surface is widened
+/// for it. That makes whole-row-dequant-then-dot the path of least
+/// resistance on-device -- and it reorders the same underlying sum
+/// DIFFERENTLY than `matvec_range_chunked`'s per-group lanes do, so
+/// `matvec_range_chunked`'s measured bound does not automatically transfer
+/// to it. Hence its own measurement, below.
+fn mean_ce_deqrow_dot(model: &Model, val: &[u16], windows: usize) -> f64 {
     let mut owned = ScratchOwned::new(&model.cfg);
     let mut s = owned.as_scratch();
     let seq = model.cfg.seq_len;
     let vocab = model.cfg.vocab;
 
-    // Deliberately plain Vec-backed scratch, sized to this model's largest
-    // `cols` value it will ever be called with (ple_proj's `ple_dim`) --
-    // matches `matvec_simd.rs`'s `MatvecSimdScratch` in spirit (a reusable
-    // buffer, sized once) without needing that crate's ESP32-only
-    // dependencies just to exercise its algorithm on the host.
+    // Deliberately plain Vec-backed scratch, sized once to this model's
+    // largest `cols` value it will ever be called with (ple_proj's
+    // `ple_dim`) -- the same shape an on-device implementation would use
+    // (one reusable fixed-size buffer, no per-row allocation), exercised
+    // here without needing any ESP32-only dependency.
     let max_cols = model.cfg.dim.max(model.cfg.ffn).max(model.cfg.ple_dim);
     let mut scratch = vec![0f32; max_cols];
 
     let deqrow_dot = |t: &QT, x: &[f32], y: &mut [f32], scratch: &mut [f32]| {
         let cols = t.cols;
+        // `r` indexes three things (deq_row's row, the scratch fill, and
+        // y) -- an `y.iter_mut().enumerate()` rewrite would still need `r`
+        // for the first two, so it buys nothing here.
+        #[allow(clippy::needless_range_loop)]
         for r in 0..t.rows {
             t.deq_row(r, &mut scratch[..cols]);
             let mut acc = 0f32;
@@ -178,7 +192,7 @@ fn mean_ce_deqrow_dot(model: &Model, val: &[u16]) -> f64 {
 
     let mut nll = 0f64;
     let mut count = 0u64;
-    for w in 0..WINDOWS {
+    for w in 0..windows {
         let base = w * seq;
         if base + seq + 1 > val.len() {
             break;
@@ -215,10 +229,10 @@ fn neg_log_prob(logits: &[f32], vocab: usize, target: usize) -> f64 {
     sum.ln() - (logits[target] - mx) as f64
 }
 
-/// The exact algorithm `llm-firmware`'s draft `matvec_simd.rs` uses
-/// (`deq_row` + whole-row dot, see `mean_ce_deqrow_dot`'s doc comment) --
-/// run with its own real measurement rather than assuming
-/// `matvec_range_chunked`'s bound transfers to a different reordering.
+/// The `deq_row` + whole-row-dot shape (see `mean_ce_deqrow_dot`'s doc
+/// comment for why an on-device implementation is likely to take it) --
+/// measured on its own rather than assuming `matvec_range_chunked`'s
+/// bound transfers to a different reordering.
 ///
 /// Measured: exact CE = 2.667096968813, deq_row+dot CE = 2.667096996723,
 /// drift = 0.000000027910 (~2.8e-8) -- same order of magnitude as, and
@@ -226,9 +240,9 @@ fn neg_log_prob(logits: &[f32], vocab: usize, target: usize) -> f64 {
 /// Same 1e-5 bound and reasoning.
 #[test]
 fn matvec_deqrow_dot_within_measured_tolerance() {
-    let (model, val) = load_fixtures();
-    let exact = mean_ce_exact(&model, &val);
-    let deqrow = mean_ce_deqrow_dot(&model, &val);
+    let (model, val, windows) = load_fixtures();
+    let exact = mean_ce_exact(&model, &val, windows);
+    let deqrow = mean_ce_deqrow_dot(&model, &val, windows);
     let drift = (deqrow - exact).abs();
     eprintln!(
         "deq_row+dot: exact CE = {exact:.12}, deqrow CE = {deqrow:.12}, drift = {drift:.12}"
@@ -259,9 +273,9 @@ fn matvec_deqrow_dot_within_measured_tolerance() {
 /// last-few-bits difference).
 #[test]
 fn matvec_range_chunked_lanes4_within_measured_tolerance() {
-    let (model, val) = load_fixtures();
-    let exact = mean_ce_exact(&model, &val);
-    let chunked = mean_ce_chunked::<4>(&model, &val);
+    let (model, val, windows) = load_fixtures();
+    let exact = mean_ce_exact(&model, &val, windows);
+    let chunked = mean_ce_chunked::<4>(&model, &val, windows);
     let drift = (chunked - exact).abs();
     eprintln!(
         "LANES=4: exact CE = {exact:.12}, chunked CE = {chunked:.12}, drift = {drift:.12}"
@@ -287,9 +301,9 @@ fn matvec_range_chunked_lanes4_within_measured_tolerance() {
 /// this model. Same 1e-5 bound and reasoning as LANES=4 above.
 #[test]
 fn matvec_range_chunked_lanes8_within_measured_tolerance() {
-    let (model, val) = load_fixtures();
-    let exact = mean_ce_exact(&model, &val);
-    let chunked = mean_ce_chunked::<8>(&model, &val);
+    let (model, val, windows) = load_fixtures();
+    let exact = mean_ce_exact(&model, &val, windows);
+    let chunked = mean_ce_chunked::<8>(&model, &val, windows);
     let drift = (chunked - exact).abs();
     eprintln!(
         "LANES=8: exact CE = {exact:.12}, chunked CE = {chunked:.12}, drift = {drift:.12}"

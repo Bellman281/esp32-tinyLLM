@@ -16,12 +16,11 @@ use llm_core::{llm_forward_with_head_override, Model};
 use llm_host::support::ScratchOwned;
 use std::fs;
 
-const MODEL_BIN: &str = "../../reference-c/firmware/model/model.bin";
-
 #[test]
 fn head_override_receives_correct_shapes_and_its_output_becomes_logits() {
-    let bytes = fs::read(MODEL_BIN)
-        .unwrap_or_else(|e| panic!("read {MODEL_BIN}: {e} (run from llm-host/)"));
+    let bin = llm_host::manifest::default_model().bin_path();
+    let bytes = fs::read(&bin)
+        .unwrap_or_else(|e| panic!("read {}: {e} (run from llm-host/)", bin.display()));
     let model = Model::load(&bytes).expect("model.bin should parse");
 
     let mut owned = ScratchOwned::new(&model.cfg);

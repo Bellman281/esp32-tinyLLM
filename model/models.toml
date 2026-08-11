@@ -1,0 +1,95 @@
+# Model registry — the single place that says which model files exist, where
+# they live, and what each one is expected to produce.
+#
+# Why this file exists: before it, every consumer hardcoded its own copy of
+# these paths and constants — four Rust test files each with their own
+# `const MODEL_BIN`, the C tools with compiled-in defaults, two firmware
+# sketches with their own `PROMPT_IDS`/`N_GENERATE`. Adding a second model
+# meant hunting all of them down, and a benchmark run could silently compare
+# two different configurations (which is exactly what happened once — see the
+# top-level README's "Attention's ratio was a benchmark artifact").
+#
+# FORMAT: a deliberately small subset of TOML — `key = value` inside
+# `[section]` blocks, where a value is a quoted string, an integer, a float,
+# or a single-line array of integers. Comments start with `#`. It is parsed
+# by `engine/llm-host/src/manifest.rs` (no external crate — the subset is
+# small enough to read directly, which keeps this workspace dependency-free)
+# and by `scripts/model.sh` with grep/sed, so the C tools can read the same
+# values without a TOML parser. Keep it inside that subset: no nested
+# tables, no multi-line arrays, no inline `{...}` tables.
+#
+# PATHS are relative to the repository root, always — not to this file, and
+# not to whatever directory a tool happens to run from.
+
+# Used when a tool or test doesn't name a model explicitly.
+default = "tinystories-v32768"
+
+
+# The real model: 28.9M-param PLE TinyLM, the one every performance number
+# in the top-level README describes and the one flashed to hardware.
+[tinystories-v32768]
+description = "28.9M-param PLE TinyLM (Gemma-style Per-Layer Embeddings), TinyStories corpus"
+bin         = "reference-c/esp32-llm-lab/model.bin"
+bin_sha256  = "3e5870b42d54e9f3a58b7b7d2a483b6f85170b5732bc1af6ac21a488a7fa7bbe"
+vocab       = "reference-c/esp32-llm-lab/vocab.h"
+val_tokens  = "data/val_v32768.bin"
+
+# Config is NOT repeated here on purpose: `model.bin`'s own header carries
+# `V D L H F P seq_len group rope_theta`, and both `llm_load` (C) and
+# `Model::load` (Rust) parse it at load time. Duplicating it here would
+# create a second source of truth that could drift from the file itself.
+# For the record, this model's header reads:
+#   V=32768 D=96 L=6 H=4 F=66 P=128 seq_len=512 group=128
+
+# Benchmark settings. BOTH the C firmware and the Rust firmware must use
+# these same values or the comparison is meaningless: `attn` is the only
+# stage whose cost scales with sequence position, so a different
+# `n_generate` or prompt length changes it while leaving every other stage
+# identical. See BENCHMARKING.md, "Why matched settings matter".
+prompt_ids  = [433, 447, 259, 405, 12, 406, 282, 259, 403, 450, 591, 504, 309, 1719, 265, 309, 1512, 1222]
+n_generate  = 400
+
+# Expected parity values, measured against the C reference.
+# `ppl_ce_fp32` must match exactly (deterministic float, same op order).
+# `ppl_ce_int8` gets a noise-floor tolerance — see ppl_parity.rs's doc
+# comment for why, and for how that floor was established.
+ppl_windows = 4
+ppl_ce_fp32 = 2.6671
+ppl_ce_int8 = 2.6684
+
+# NOTE — no `golden` key here: no PyTorch golden-logit reference exists for
+# this model. Correctness for it is covered against the C reference instead,
+# and exactly: `ppl_parity.rs` (cross-entropy) and `cli_parity.rs`
+# (byte-for-byte CLI output). The direct PyTorch check lives on the fixture
+# model below. Producing a real golden run for THIS model via
+# slvDev/esp32-ai's export tooling would close that gap — see
+# model/README.md's "A real inconsistency in this repo".
+
+
+# Fixture model — NOT shipped, NOT flashed, and not what any performance
+# number in this repo describes. It is registered for exactly one reason:
+# it is the only model with a matching PyTorch golden-logit reference, so
+# it is what `golden.rs` checks fp32 logit precision against (max abs diff
+# 1e-5). That is the project's only direct PyTorch parity gate; everything
+# else verifies against the C reference, which was itself verified against
+# PyTorch upstream. Keeping this entry preserves a first-hand check instead
+# of relying on that transitive chain.
+[golden-v4096]
+description = "3.5M-param fixture model — the only one with a PyTorch golden-logit reference"
+bin         = "reference-c/firmware/model/model.bin"
+bin_sha256  = "40a81d9ae9b1d959ca449bab3f3c985f0c0d3fd7e67b71cf7f2e21fdf34ee534"
+golden      = "reference-c/firmware/model/golden.txt"
+# Header reads: V=4096 D=128 L=6 H=4 F=415 P=64
+
+
+# ADDING A MODEL
+# --------------
+# Add a `[name]` section with at least `description`, `bin`, `bin_sha256`.
+# Add `vocab` / `val_tokens` / `golden` / `prompt_ids` / `n_generate` /
+# `ppl_*` as the model supports them; consumers that need a field they
+# didn't declare fail loudly rather than silently defaulting.
+# Then point `default` at it, or name it explicitly:
+#   Rust:  llm_host::manifest::model("your-name")
+#   Shell: scripts/model.sh bin your-name
+# `manifest.rs`'s `real_registry_parses_and_its_files_exist` test checks
+# every path you declare actually resolves, so a typo fails fast.
