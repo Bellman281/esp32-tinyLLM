@@ -163,6 +163,8 @@ esp32-tinyLLM/
   MIGRATION_PLAN.md       <- phase-by-phase plan, ground rules, full detail
   BENCHMARKING.md          <- how the C-vs-Rust numbers were measured, and
                                what to optimize next
+  ROADMAP.md               <- what to do next, in order, and what's still
+                               unexplained
   model/                    <- trained model, dataset docs, and models.toml
                                (the registry both C and Rust read)
   scripts/                  <- model.sh, the C side's registry reader
@@ -200,9 +202,11 @@ correctness is actually being enforced rather than assumed.
 
 ## Contributing
 
-The main open work is closing the Rust-vs-C performance gap — start with
-[`BENCHMARKING.md`](./BENCHMARKING.md)'s "What to optimize next", which
-ranks the two real levers and says what is already built for each. See
+The main open work is closing the Rust-vs-C performance gap.
+[`ROADMAP.md`](./ROADMAP.md) sequences it — two cheap unknowns gate most of
+the expensive work, so start there rather than with the SIMD items —
+and [`BENCHMARKING.md`](./BENCHMARKING.md)'s "What to optimize next" has the
+per-lever detail. See
 [CONTRIBUTING.md](./CONTRIBUTING.md) for the ground rules (`reference-c/`
 takes build fixes only, `llm-core` stays platform-agnostic) and how to run
 the parity tests.
