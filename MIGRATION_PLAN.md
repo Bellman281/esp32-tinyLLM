@@ -13,8 +13,8 @@ esp32-Rust/
   MIGRATION_PLAN.md      <- this file
   reference-c/             <- frozen, read-only copy of the working C/C++ engine
                                (ground truth + regression oracle; see its own README.md)
-  data/                     <- validation token data for the ppl parity test
-                               (val_v32768.bin), added in Phase 2
+  model/                    <- this repo's own trained models, one folder per
+                               registry entry, plus models.toml
   engine/                  <- the new Rust workspace; all porting work happens here
     Cargo.toml               (workspace manifest)
     llm-core/                <- no_std, platform-agnostic model math (Phase 1 — DONE)
@@ -120,7 +120,7 @@ for why the remainder is expected, not a bug.
 - **`cli_parity.rs`** — `host-generate`'s stdout is byte-for-byte identical
   to a captured run of the compiled C `host_generate.c` binary (same
   model, same hardcoded prompt, default N=120 continuation).
-- **`ppl_parity.rs`** — cross-entropy over `data/val_v32768.bin`.
+- **`ppl_parity.rs`** — cross-entropy over `model/tinystories-v32768/val.bin`.
   fp32-activations: exact match to the C reference's printed digits
   (CE 2.6671). int8-activations: within a tolerance set from an empirically
   measured float non-associativity noise floor — rebuilding the *C
@@ -181,9 +181,10 @@ zero C, zero FreeRTOS, zero ESP-IDF anywhere in the build or the toolchain.
   analyze.py, gen_assets.py, model.py) — untouched.
 - `esp32-llm-lab/chat.py` — untouched (Python, not C/C++; also the only
   place text ever gets tokenized, and it stays off-chip).
-- `data/` under the original esp32-ai project, `runs/` — untouched. (The
-  `data/val_v32768.bin` under *this* repo's own `data/` is a copy staged
-  purely for the Rust ppl parity test to read; nothing writes to it.)
+- `data/` under the original esp32-ai project, `runs/` — untouched. (This
+  repo keeps its own validation tokens at
+  `model/tinystories-v32768/val.bin`, read by the Rust ppl parity test;
+  nothing writes to it.)
 - The binary model format itself (ragged int4, fp16 scales, magic header) —
   unchanged; `llm-core` reads exactly what `export.py` already produces.
 

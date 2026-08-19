@@ -1,34 +1,81 @@
-# model/ — the trained model and its dataset
+# model/ — this repo's trained models
 
-This folder bundles the trained weights and their supporting artifacts in one
-documented place, so you don't have to go spelunking through `reference-c/`
-to find them. The weight/vocab/token files here are a copy for reference and
-convenience — the artifacts themselves are produced upstream (see "Where this
-comes from" below), and the copies actually consumed by the build still live
-where the rest of this repo expects them (`reference-c/esp32-llm-lab/`,
-`data/`).
+**This folder is canonical.** The registry points here, the parity tests read
+from here, and `scripts/model.sh` resolves here. It is not a convenience copy
+of something else — an earlier version of this file said it was, and that is
+no longer true.
 
-The one file here that **is** wired into the build is
-[`models.toml`](./models.toml), the model registry — every parity test and
-both languages' tooling read their paths and expected values from it. See
-"Where it's actually used from" below and the top-level README's "The model
-registry".
+## Layout
 
-**This is the model**: `model.bin` here is `reference-c/esp32-llm-lab/model.bin`
-(14.91 MB) — the 28.9M-parameter, 32,768-vocab PLE TinyLM that the top-level
-README and every performance number in this repo actually describe. It is
-**not** the same file as `reference-c/firmware/model/model.bin` (1.87 MB,
-V=4096, ~3.5M params) — an earlier attempt at this folder mistakenly copied
-that smaller file instead. See "A real inconsistency in this repo" below.
+One folder per registry entry, named exactly as the `models.toml` section:
 
-## What's in this folder
+```
+model/
+  models.toml                    <- the registry (see below)
+  README.md                      <- this file
+  tinystories-v32768/            <- one folder per model, named as its
+    model.bin                       models.toml section
+    vocab.h
+    val.bin
+```
+
+Adding a model means dropping in a folder and adding a `[section]` to
+`models.toml` — nothing else in the repo needs editing, which is the whole
+point of the registry. `manifest.rs`'s `real_registry_parses_and_its_files_exist`
+test fails on a path that doesn't resolve, so a typo can't ship.
+
+Conventional filenames inside a model folder (declare in `models.toml`
+whichever the model actually has):
+
+| file | what it is |
+|---|---|
+| `model.bin` | the exported, quantized weights |
+| `vocab.h` | token-id → UTF-8 bytes decode table |
+| `val.bin` | validation tokens for the perplexity parity test |
+| `golden.txt` | PyTorch reference logits, if one was produced |
+
+One exception, deliberate: **`golden-v4096` has no folder here.** It is
+upstream's own 3.5M-param fixture living in `reference-c/firmware/model/`, and
+`reference-c/` is a frozen mirror that is refreshed wholesale, not reorganized
+(CONTRIBUTING ground rule 1). It stays registered by its path over there.
+
+## The model that ships
+
+`tinystories-v32768/model.bin` (14.91 MB) — the 28.9M-parameter PLE TinyLM
+that the top-level README and every performance number in this repo describe.
+It is **not** `reference-c/firmware/model/model.bin` (1.87 MB, V=4096, ~3.5M
+params) — an earlier attempt at this folder mistakenly copied that smaller
+file instead. See "A real inconsistency in this repo" below.
+
+**Provenance:** it was trained on 2 August 2026 on a rented VPS GPU by this
+repo's author, using the upstream pipeline (now vendored at
+[`training/`](../training/) and walked through in
+[`TRAINING.md`](../TRAINING.md)). It is *not* a download of upstream's
+published release — that artifact is a different file:
+
+| | bytes | sha256 |
+|---|---|---|
+| this repo's `model.bin` | 14,912,332 | `3e5870b4…7fa7bbe` |
+| `slvDev/esp32-ai-tinystories` on HuggingFace | 14,912,348 | `1d8326c0…b45477e` |
+
+The 16-byte difference is the header, not the weights: upstream's current
+exporter writes a 56-byte versioned header, this file carries the older
+40-byte one. Same architecture, so the tensor payload is the same size either
+way. See [`TRAINING.md`](../TRAINING.md)'s "The export format gap".
+
+`reference-c/esp32-llm-lab/` also contains a `model.bin` and `vocab.h`. Those
+belong to the frozen C mirror — `gen_prompt.c` `#include`s that `vocab.h` at
+compile time — and are left alone on purpose. Nothing in the registry points
+at them.
+
+## What's in `tinystories-v32768/`
 
 | File | What it is |
 |---|---|
 | `model.bin` | The trained, quantized model weights. Group-128 ragged int4 weights + fp16 group scales, tied input/output embedding. Config `V=32768 D=96 L=6 H=4 F=66 P=128 seq_len=512 group=128`, parsed directly from the file header. 14.91 MB. |
 | `vocab.h` | The tokenizer's token-id → UTF-8 bytes table, **25,353** entries (`VOCAB_N`). Generated data, not logic. Note this is *not* the 32,768 in `model.bin`'s header — see "Two different vocab numbers" below. |
-| `val_v32768.bin` | A stream of validation tokens (vocab size 32,768) used to compute cross-entropy/perplexity in the `ppl` parity tests (`engine/llm-host/tests/ppl_parity.rs`), which load this exact model. |
-| `models.toml` | **The model registry** — the single place naming which model files exist, where they live, and what each is expected to produce. Read by Rust (`llm_host::manifest`) and by the C-side tooling (`scripts/model.sh`), so both get their paths, prompt ids, window counts, and expected cross-entropy from one source. See the top-level README's "The model registry". |
+| `val.bin` | A stream of validation tokens (vocab size 32,768) used to compute cross-entropy/perplexity in the `ppl` parity tests (`engine/llm-host/tests/ppl_parity.rs`), which load this exact model. |
+| `models.toml` (in `model/`, not the model folder) | **The model registry** — the single place naming which model files exist, where they live, and what each is expected to produce. Read by Rust (`llm_host::manifest`) and by the C-side tooling (`scripts/model.sh`), so both get their paths, prompt ids, window counts, and expected cross-entropy from one source. See the top-level README's "The model registry". |
 
 SHA-256 of the `model.bin` in this folder:
 
@@ -141,35 +188,39 @@ time.
 
 ## Where this comes from
 
-Training, tokenization, quantization, and export are all out of scope for
-*this* repo by design (see the top-level `MIGRATION_PLAN.md`) and live
-entirely upstream, in Python, in
-**[slvDev/esp32-ai](https://github.com/slvDev/esp32-ai)**. Nothing in this
-repo regenerates those files; they're consumed as-is. A full from-scratch
-walkthrough (including the pure-C host demo and the QEMU device emulator)
-is in `reference-c/esp32-llm-lab/README.md`.
+The *pipeline* — training, tokenization, quantization, export — is written in
+Python and originates upstream in
+**[slvDev/esp32-ai](https://github.com/slvDev/esp32-ai)**. It is vendored here
+unmodified at [`training/`](../training/), with a walkthrough in
+[`TRAINING.md`](../TRAINING.md), for reference only: no build target runs it.
 
-## Where it's actually used from
+The *artifacts* in this folder were produced by running that pipeline —
+trained 2 August 2026 on a rented VPS GPU by this repo's author, not
+downloaded from upstream's release. Regenerating them is a manual act
+performed outside any build here; see `TRAINING.md`, including the open
+export-format blocker that currently prevents a clean re-run.
 
-Nothing reads these copies directly. Every consumer goes through
-[`models.toml`](./models.toml), which points at the artifacts in their
-original locations:
+A full from-scratch walkthrough of the C side (the pure-C host demo and the
+QEMU device emulator) is in `reference-c/esp32-llm-lab/README.md`.
 
-- `reference-c/esp32-llm-lab/model.bin` and `vocab.h` — the C reference
-  copy, refreshed wholesale from upstream if the model changes. Registered
-  as `tinystories-v32768`'s `bin` and `vocab`.
-- `data/val_v32768.bin` — the perplexity parity test's validation tokens.
-  Registered as `val_tokens`.
-- `reference-c/firmware/model/model.bin` and `golden.txt` — the smaller
-  fixture model, registered separately as `golden-v4096` because it is the
-  only one with a PyTorch golden-logit reference (see the inconsistency
+## Where it's used from
+
+Every consumer goes through [`models.toml`](./models.toml). Nothing hardcodes
+a path:
+
+- `model/tinystories-v32768/{model.bin, vocab.h, val.bin}` — registered as
+  `tinystories-v32768`'s `bin`, `vocab` and `val_tokens`. This is the
+  `default`, so `scripts/model.sh bin` and `llm_host::manifest::default()`
+  resolve here.
+- `reference-c/firmware/model/model.bin` and `golden.txt` — upstream's
+  smaller fixture, registered separately as `golden-v4096` because it is the
+  only model with a PyTorch golden-logit reference (see the inconsistency
   note above). `golden.rs` names it explicitly rather than following
-  `default`, so repointing `default` at a new model can't silently move
-  that check onto a model with no golden file.
+  `default`, so repointing `default` at a new model can't silently move that
+  check onto a model with no golden file.
 
-So changing where a file lives means editing `models.toml`, not hunting
-through test files for hardcoded paths — which is exactly what it exists
-to prevent.
+So moving a file means editing `models.toml`, not hunting through test files
+for hardcoded paths — which is exactly what it exists to prevent.
 
 ## Try it yourself (host, no ESP32 needed)
 

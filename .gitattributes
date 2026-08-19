@@ -5,5 +5,4 @@
 # reflects what's actually being authored here.
 reference-c/** linguist-vendored
 model/** linguist-vendored
-data/** linguist-vendored
 demo/bpe32768.json linguist-vendored
