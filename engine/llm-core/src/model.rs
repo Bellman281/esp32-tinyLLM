@@ -496,7 +496,7 @@ fn llm_forward_impl(
             let layer_kc = &mut s.kcache[l * seq * d..(l + 1) * seq * d];
             let layer_vc = &mut s.vcache[l * seq * d..(l + 1) * seq * d];
             attention::forward(
-                q, k, v, layer_kc, layer_vc, s.att, s.scores, pos, d, h_heads, dh,
+                q, k, v, layer_kc, layer_vc, s.att, s.scores, pos, d, h_heads, dh, seq,
             );
         }
         dispatch_matvec(&mut matvec_override, &layer.attn_proj, s.att, s.h, s.iq);
