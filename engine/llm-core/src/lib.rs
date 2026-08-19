@@ -23,4 +23,4 @@ pub use model::{
 };
 pub use profile::Profile;
 pub use scratch::{sizes as scratch_sizes, Scratch, ScratchSizes};
-pub use tensor::{quantize_activations, Cfg, LoadError, FVec, QT};
+pub use tensor::{dot_int4_int8, quantize_activations, Cfg, FVec, LoadError, QT};

@@ -46,7 +46,7 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::hal::sys::{TaskHandle_t, TickType_t};
 use esp_idf_svc::hal::task;
-use llm_core::{quantize_activations, QT};
+use llm_core::{dot_int4_int8, quantize_activations, QT};
 
 use crate::psram;
 
@@ -66,10 +66,13 @@ const MAX_HEAD_COLS: usize = 128;
 /// there is exactly one instance, leaked for `'static` lifetime by
 /// `stage_and_spawn`, same as the C reference's file-scope globals.
 pub struct Head {
-    w8: &'static [i8],      // [rows * cols], unpacked int4->int8 in PSRAM
+    // [rows * row_bytes] of PACKED int4 codes in PSRAM -- NOT the C
+    // reference's [rows * cols] int8. See `stage_and_spawn`.
+    w4: &'static [u8],
     scale8: &'static [f32], // [rows], per-row dequant scale
     rows: usize,
     cols: usize,
+    row_bytes: usize, // ceil(cols / 2)
 
     // Shared quantized-activation scratch: written once by `matvec` before
     // notifying the worker, read by both `matvec` (this core's half) and
@@ -102,41 +105,36 @@ impl Head {
     /// longer) that the caller has the right to write `y[r0..r1]` of --
     /// i.e. no other writer is touching that sub-range concurrently.
     unsafe fn rows_range(&self, y: *mut f32, r0: usize, r1: usize) {
-        // SAFETY: see the `actq` field doc comment -- by the time this
-        // runs (either core), the write that populated it has already
-        // happened-before, and nothing writes it again until both readers
-        // are done.
         let cols = self.cols;
-        let w8 = self.w8;
+        let rb = self.row_bytes;
+        let w4 = self.w4;
         let scale8 = self.scale8;
         // Slice the fixed-size scratch down to `cols` ONCE, out here, rather
         // than indexing `actq[j]` in the inner loop. `actq` is a
         // `[i8; MAX_HEAD_COLS]` (128) but `cols` is a runtime field, so inside
         // the loop LLVM cannot prove `j < 128` and emits a bounds check per
-        // multiply-accumulate -- on a loop body that runs `rows * cols` = 2.4M
-        // times per token. Slicing here gives the two iterators a common,
-        // provable length, so the zip below carries no bounds checks at all
-        // and the unroller can work on it. Same arithmetic either way; this is
-        // purely about what reaches the backend.
-        // Two steps, not `&(*self.actq.get())[..cols]` -- that form trips
-        // rustc's deny-by-default `dangerous_implicit_autorefs` lint
-        // (the index would autoref through the raw pointer deref).
+        // multiply-accumulate. Slicing here gives `dot_int4_int8` a slice whose
+        // length *is* `cols`, which is also how it learns how many codes to
+        // read. Two steps, not `&(*self.actq.get())[..cols]` -- that form trips
+        // rustc's deny-by-default `dangerous_implicit_autorefs` lint.
+        // SAFETY: see the `actq` field doc comment -- by the time this runs
+        // (either core), the write that populated it has already
+        // happened-before, and nothing writes it again until both readers are
+        // done.
         let actq_all: &[i8; MAX_HEAD_COLS] = unsafe { &*self.actq.get() };
         let actq: &[i8] = &actq_all[..cols];
         let acts = f32::from_bits(self.acts.load(Ordering::Acquire));
         for r in r0..r1 {
-            let row = &w8[r * cols..r * cols + cols];
-            // Matches C's `dot_i8`: plain int32 accumulation, no
-            // saturation (codes are -8..=7, activations -127..=127, cols
-            // <= 128, so the max possible |acc| is 8*127*128 ~= 130k --
-            // nowhere near i32::MAX).
-            let mut acc: i32 = 0;
-            for (&a, &w) in actq.iter().zip(row.iter()) {
-                acc += a as i32 * w as i32;
-            }
+            // Two codes per byte, unpacked in the loop instead of at boot.
+            // `llm_core::dot_int4_int8` is asserted bit-for-bit equal to the
+            // staged-int8 dot over every row of the shipped model by
+            // llm-host/tests/int4_head_equivalence.rs -- integer addition is
+            // associative and every term is the same term, so this is exact,
+            // not approximate.
+            let acc = dot_int4_int8(&w4[r * rb..r * rb + rb], actq);
             let val = acc as f32 * scale8[r] * acts;
-            // SAFETY: caller's contract (see this fn's doc comment) is
-            // that `y[r0..r1]` is this call's alone to write.
+            // SAFETY: caller's contract (see this fn's doc comment) is that
+            // `y[r0..r1]` is this call's alone to write.
             unsafe { core::ptr::write(y.add(r), val) };
         }
     }
@@ -264,13 +262,16 @@ pub fn stage_and_spawn(tok_emb: QT<'static>, vocab_n: usize) -> Result<&'static 
         return Err("model dim exceeds MAX_HEAD_COLS (128) -- head_actq scratch too small");
     }
 
-    let (w8, scale8) = psram::alloc_head_tables(rows, cols);
+    let row_bytes = t.row_bytes;
+    let (w4, scale8) = psram::alloc_head_tables(rows * row_bytes, rows);
     for r in 0..rows {
-        let scale = t.unpack_row_int8(r, &mut w8[r * cols..(r + 1) * cols]);
+        let (codes, scale) = t.packed_row(r);
+        w4[r * row_bytes..(r + 1) * row_bytes].copy_from_slice(codes);
         scale8[r] = scale;
     }
     log::info!(
-        "head staged int8: {:.2} MB",
+        "head staged int4: {:.2} MB (int8 staging would be {:.2} MB)",
+        (rows * row_bytes + rows * 4) as f64 / 1e6,
         (rows * cols + rows * 4) as f64 / 1e6
     );
 
@@ -278,10 +279,11 @@ pub fn stage_and_spawn(tok_emb: QT<'static>, vocab_n: usize) -> Result<&'static 
         task::current().ok_or("no current FreeRTOS task handle -- call stage_and_spawn from main")?;
 
     let head: &'static Head = Box::leak(Box::new(Head {
-        w8,
+        w4,
         scale8,
         rows,
         cols,
+        row_bytes,
         actq: UnsafeCell::new([0i8; MAX_HEAD_COLS]),
         acts: AtomicU32::new(0),
         job_y: core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),

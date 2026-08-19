@@ -91,15 +91,19 @@ pub fn alloc_scratch_psram(cfg: &Cfg) -> Scratch<'static> {
     }
 }
 
-/// Allocates the staged int8 head's two PSRAM tables
-/// (`head_w8`/`head_scale8` in the C reference). Split out from
-/// `head::stage_int8` so this module stays the single place that knows how
-/// to talk to `heap_caps_malloc`.
-pub fn alloc_head_tables(rows: usize, cols: usize) -> (&'static mut [i8], &'static mut [f32]) {
-    // SAFETY: i8/f32, zero is a valid bit pattern for both; every element
-    // is overwritten by `head::stage_int8` immediately after this returns,
-    // before any of it is read.
-    unsafe { (ps_slice(rows * cols), ps_slice(rows)) }
+/// Allocates the staged head's two PSRAM tables (`head_w8`/`head_scale8` in
+/// the C reference). Split out from `head::stage_and_spawn` so this module
+/// stays the single place that knows how to talk to `heap_caps_malloc`.
+///
+/// `weight_bytes` is `rows * cols` for the int8 staging the C reference does,
+/// or `rows * row_bytes` (half that) when the head is staged as packed int4 --
+/// see `head::stage_and_spawn`. Taking bytes rather than (rows, cols) keeps
+/// that choice in one place instead of two.
+pub fn alloc_head_tables(weight_bytes: usize, rows: usize) -> (&'static mut [u8], &'static mut [f32]) {
+    // SAFETY: u8/f32, zero is a valid bit pattern for both; every element is
+    // overwritten by the caller immediately after this returns, before any of
+    // it is read.
+    unsafe { (ps_slice(weight_bytes), ps_slice(rows)) }
 }
 
 /// Ports `heap_caps_get_free_size(MALLOC_CAP_SPIRAM)` for the boot log line

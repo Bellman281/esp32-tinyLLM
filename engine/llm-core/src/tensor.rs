@@ -399,6 +399,17 @@ impl<'a> QT<'a> {
         self.scale(r, 0)
     }
 
+    /// One row's packed int4 codes (`row_bytes` of them) and its group-0
+    /// scale — what `llm-firmware` copies into PSRAM when it stages the head
+    /// as int4 rather than unpacking it to int8. Same `n_groups == 1`
+    /// contract as `unpack_row_int8`.
+    pub fn packed_row(&self, r: usize) -> (&'a [u8], f32) {
+        (
+            &self.codes[r * self.row_bytes..(r + 1) * self.row_bytes],
+            self.scale(r, 0),
+        )
+    }
+
     /// int8-activation path (SIMD-friendly form used on-device). Ports
     /// `matvec_q8_range` / `matvec_q8` / `quantize_act`. `iq` is caller-owned
     /// scratch (>= self.cols), replacing the C static buffer so this is
@@ -471,6 +482,54 @@ impl<'a> QT<'a> {
             y[r] = acc * x_scale;
         }
     }
+}
+
+/// int8-activation dot product against a row of **packed int4 codes**, without
+/// unpacking the row first. Returns the raw `i32` accumulation; the caller
+/// applies the row scale and the activation scale, exactly as
+/// `matvec_int8_activations` does.
+///
+/// WHY THIS EXISTS. `llm-firmware` stages the tied output head into PSRAM as
+/// int8 at boot (`stage_head_int8` in the C reference), unpacking every int4
+/// nibble once so the per-token loop is a plain `i8 * i8` dot. That trade buys
+/// simpler arithmetic and pays for it in bytes: it **doubles** what the head
+/// streams per token, 2.43 MB instead of 1.21 MB on the shipped model, and it
+/// costs 2.4 MB of PSRAM to hold.
+///
+/// The trade was struck when unpacking a nibble meant a mask, a subtract and a
+/// conversion. It now means one indexed load from `NIBBLE_I8` (64 bytes, always
+/// resident), and the `+ wider caches` result in BENCHMARKING.md — which moved
+/// this stage 21%, more than any other change moved any other stage — says the
+/// head is bound by memory, not by arithmetic. Halving the stream is therefore
+/// worth more than the unpack costs, *if* that reading is right. This function
+/// is how that gets tested rather than argued about.
+///
+/// EXACT, not approximate: `i32` addition is associative and every term is
+/// identical to the one the unpacked path produces, so this returns bit-for-bit
+/// what `dot_i8` over the staged int8 row returns. `llm-host`'s
+/// `int4_head_equivalence.rs` asserts that over every row of the real model,
+/// which is the whole safety argument for the firmware change.
+///
+/// `row_codes` is one row of `QT::codes` (`row_bytes = ceil(cols/2)` bytes) and
+/// `actq` the quantized activations (`cols` of them). Assumes `n_groups == 1`
+/// for the row — the same contract `unpack_row_int8` documents, and true of
+/// every shipped model's `tok_emb` (`group = 128 >= cols = 96`).
+#[inline]
+pub fn dot_int4_int8(row_codes: &[u8], actq: &[i8]) -> i32 {
+    let cols = actq.len();
+    let pairs = cols / 2;
+    let mut acc: i32 = 0;
+    // Two activations per packed byte, the same shape every other unpack site
+    // in this file uses; see `matvec_range`'s note on why it is driven by a zip
+    // over pre-sliced runs rather than by an index.
+    for (b, ap) in row_codes[..pairs].iter().zip(actq[..2 * pairs].chunks_exact(2)) {
+        acc += NIBBLE_I8[(b & 0xF) as usize] as i32 * ap[0] as i32;
+        acc += NIBBLE_I8[(b >> 4) as usize] as i32 * ap[1] as i32;
+    }
+    if cols & 1 == 1 {
+        acc += NIBBLE_I8[(row_codes[pairs] & 0xF) as usize] as i32 * actq[cols - 1] as i32;
+    }
+    acc
 }
 
 /// A plain fp32 vector view (norm weights etc.), stored as raw little-endian
