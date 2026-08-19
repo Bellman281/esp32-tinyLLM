@@ -27,14 +27,36 @@ either firmware drifts from them.
 
 ## Results
 
+<!-- BEGIN device-table (generated: scripts/plot_stages.py --inject) -->
+
 | ms/token | input | attn | ffn | ple | head | total | tok/s |
 |---|---|---|---|---|---|---|---|
 | **C reference** | 4.4 | 42.9 | 6.9 | 8.5 | 57.1 | **119.8** | 8.20 |
-| **Rust** | 7.8 | 54.4 | 11.9 | 15.2 | 90.3 | **179.6** | 5.47 |
-| ratio | 1.77x | 1.27x | 1.72x | 1.79x | 1.58x | **1.50x** | |
-| absolute gap | +3.4 | +11.5 | +5.0 | +6.7 | **+33.2** | +59.8 | |
+| **Rust, before** | 7.8 | 54.4 | 11.9 | 15.2 | 94.6 | **183.9** | 5.34 |
+| **Rust, nibble LUT** | 6.6 | 50.8 | 10.1 | 12.7 | 98.0 † | **178.2** | 5.51 |
+| ratio vs C reference | 1.50x | 1.18x | 1.46x | 1.49x | 1.72x | **1.49x** | |
+| absolute gap | +2.2 | +7.9 | +3.2 | +4.2 | +40.9 | +58.4 | |
+| **change this brought** | -1.2 | -3.6 | -1.8 | -2.5 | +3.4 | **-5.7** | |
 
-Both measured the same evening on the same board. C: 400 tokens in 48.78 s,
+† **Rust, nibble LUT: `head` is provisional.** head is the control — untouched by this commit — and drifted 90.3 -> 94.6 -> 98.0 across three back-to-back runs, which reads as thermal ramp rather than scatter. The four stages the commit touches are stable to 0.0 ms across the same runs. Total pending repeat runs.
+
+<!-- END device-table -->
+
+`total` is the sum of the profiled stages; `tok/s` comes from wall clock, which
+runs 2–3 ms/token above that sum on both engines — token sampling, argmax and
+serial output sit outside the profiled stages. The two agree on deltas: wall
+went 187.2 → 181.6 ms/token across the nibble-LUT change, against the −5.7 ms
+the stage sum shows.
+
+This table and `png/benchmark-stages.svg` are both generated from
+[`benchmarks/device.toml`](./benchmarks/device.toml) by
+`scripts/plot_stages.py --inject`. Before that existed the chart was a
+hand-drawn PNG with no generator and the table was hand-maintained in two
+files, so both aged silently every time someone reflashed. Record a new run as
+its own `[run.<id>]` section rather than editing an existing one — the point is
+that what was measured, when, and against which commit survives.
+
+The C row and the first Rust row were measured the same evening on the same board. C: 400 tokens in 48.78 s,
 reproduced bit-identically across three independent runs (same total to
 0.01 s, same per-stage figures to 0.1 ms). Rust: 400 tokens in 73.07 s from
 `cargo run --release` on the current tree. Neither is quoted from anywhere.
@@ -200,8 +222,14 @@ Two caveats on reading this table:
   *ratio* is sound; the absolute ms/token is not comparable to the table
   above.
 
-That the host ratio (1.47x) lands so close to the device's (1.50x) is
-**not yet explained and should not be assumed causal.** On the device, the
+**Resolved: it was coincidence.** The nibble-LUT change took the host from
+1.47x to 1.11x while the device moved 1.50x to ~1.49x — the two ratios came
+apart the moment anything changed, so their earlier agreement carried no
+information. The paragraph below is kept because the reasoning that raised the
+suspicion was right; the suspicion itself is now answered.
+
+That the host ratio (1.47x) landed so close to the device's (1.50x) was
+**never explained and should not have been assumed causal.** On the device, the
 head is 56% of the absolute gap and is bandwidth-bound; on the host it
 cannot be. The agreement may mean the shared fp32 matvec dominates both for
 the same reason, or it may be coincidence. Nothing here has isolated it
@@ -242,6 +270,7 @@ both firmwares' constants against the registry.
 | first run | 10.6 | 66.7 | 15.8 | 20.4 | 193.8 | 307.4 | 3.21 |
 | + dual-core, byte-pair unroll | 8.0 | 58.9 | 11.8 | 15.1 | 110.9 | 204.8 | 4.79 |
 | + wider caches | 7.4 | 53.7 | 11.2 | 14.3 | 87.6 | 174.2 | 5.64 |
+| + nibble LUT, pair-unrolled unpack | 6.6 | 50.8 | 10.1 | 12.7 | 98.0 | 178.2 | 5.51 |
 
 All at 400 tokens / 18-token prompt, so comparable to each other and to the
 C row above. Three changes, in order of what they were worth:
@@ -264,15 +293,18 @@ C row above. Three changes, in order of what they were worth:
    110.9 to 87.6 ms — it streams 2.43 MB of PSRAM sequentially, exactly the
    access pattern a wider cache line helps.
 
-The current tree measures **179.6**, not that last row's 174.2. Two things
-landed since: `attention.rs`/`ops.rs` zip-based loops (an improvement when
-measured), and the `matvec_override` hook, which adds a branch to every
-matvec call. That hook has no shipping user yet, and its cost looks like
+Before the nibble-LUT row the tree measured **179.6**, not the wider-caches
+row's 174.2. Two things had landed in between: `attention.rs`/`ops.rs`
+zip-based loops (an improvement when measured), and the `matvec_override`
+hook, which adds a branch to every matvec call. That hook has no shipping user yet, and its cost looks like
 roughly 2 ms/token — but that has not been isolated by a clean before/after
 on one build, so treat it as a suspect rather than a measurement. Worth an
 A/B before anyone optimizes around it.
 
-**What is left is not a port bug.** Every stage is a line-for-line
+**What is left is not a port bug** — and the nibble-LUT row is evidence for
+that reading rather than against it: it did not fix a translation error, it
+removed per-element work the C compiler never had to do, and the output stayed
+bit-identical throughout. Every stage is a line-for-line
 translation of the same loop in `reference-c/firmware/common/llm.h`, and
 the host parity suite proves the arithmetic is bit-identical. The remaining
 gap is most likely GCC's Xtensa backend against LLVM's on scalar float and
@@ -283,11 +315,23 @@ S3's SIMD unit, not more flag-tuning.
 
 Two levers, ranked by what the measured table says.
 
-### 1. The fp32 matvec — worst ratios, scaffolding already in `main`
+### 1. The fp32 matvec — partly done; SIMD still open
 
-`ple` (1.79x), `input` (1.77x) and `ffn` (1.72x) are furthest from parity,
-and all three run through `QT::matvec_range`, the fp32-dequantized-weight
-path. So do `qkv` and `attn_proj`. Together, +15.1 ms/token.
+**Update.** `ple` (1.79x), `input` (1.77x) and `ffn` (1.72x) were the three
+furthest from parity, all running through `QT::matvec_range`. Two bit-exact
+changes to that function — a 16-entry nibble→f32 table replacing a per-element
+subtract-and-convert, and `zip`-driven steady-state loops replacing indexed
+ones — moved them to **1.49x / 1.50x / 1.46x**, and `attn` (which also routes
+`qkv` and `attn_proj` through it) from 1.27x to 1.18x. Together −9.1 ms/token,
+−10.2% across those four stages, output bit-identical.
+
+That was the cheap half, and it did not need SIMD. The rest of this section —
+the ESP32-S3's PIE vector unit — is still open and still the larger prize.
+
+For the record, the pre-change framing: `ple` (1.79x), `input` (1.77x) and
+`ffn` (1.72x) were furthest from parity, and all three run through
+`QT::matvec_range`, the fp32-dequantized-weight path. So do `qkv` and
+`attn_proj`. Together, +15.1 ms/token.
 
 > An earlier version of this section named `QT::matvec_int8_activations` as
 > the SIMD target. The firmware never calls it — like the C sketch, it does
@@ -327,8 +371,11 @@ before/after on hardware, not an assumption that SIMD is faster.
 
 ### 2. The output head — biggest absolute gap, but diagnose first
 
-At +33.2 ms/token the head is **56% of the entire Rust-vs-C gap**, far more
-than any other stage in absolute terms, despite a middling 1.58x ratio. It
+At +40.9 ms/token the head is now **roughly two-thirds of the entire
+Rust-vs-C gap** — it was 56% before the nibble-LUT change shrank everything
+else — and far more than any other stage in absolute terms. (Its own figure is
+provisional: see the table's footnote. Even at its previously recorded 90.3 it
+is 65% of the gap, so the conclusion does not depend on settling that.) It
 is already int8-staged and split across both cores, and it streams 2.43 MB
 of PSRAM per token. The `+ wider caches` change moved it more than any
 other stage (-21%), pointing at memory bandwidth rather than instruction

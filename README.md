@@ -45,12 +45,37 @@ On a board: `cd engine/llm-firmware && cargo run --release`.
 
 ### C vs Rust, measured on hardware
 
-![Per-stage inference cost, C vs Rust](./png/benchmark-stages.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./png/benchmark-stages-dark.svg">
+  <img alt="Per-stage inference cost, C vs Rust" src="./png/benchmark-stages.svg">
+</picture>
 
 Both firmwares emit **byte-identical text** — same 400 tokens, cut off at the same
-word. Rust is currently **1.50x slower**, and the output head is 56% of that gap.
-Closing it is the main open work. Methodology and per-lever detail:
-[BENCHMARKING.md](./BENCHMARKING.md).
+word.
+
+<!-- BEGIN device-table (generated: scripts/plot_stages.py --inject) -->
+
+| ms/token | input | attn | ffn | ple | head | total | tok/s |
+|---|---|---|---|---|---|---|---|
+| **C reference** | 4.4 | 42.9 | 6.9 | 8.5 | 57.1 | **119.8** | 8.20 |
+| **Rust, before** | 7.8 | 54.4 | 11.9 | 15.2 | 94.6 | **183.9** | 5.34 |
+| **Rust, nibble LUT** | 6.6 | 50.8 | 10.1 | 12.7 | 98.0 † | **178.2** | 5.51 |
+| ratio vs C reference | 1.50x | 1.18x | 1.46x | 1.49x | 1.72x | **1.49x** | |
+| absolute gap | +2.2 | +7.9 | +3.2 | +4.2 | +40.9 | +58.4 | |
+| **change this brought** | -1.2 | -3.6 | -1.8 | -2.5 | +3.4 | **-5.7** | |
+
+† **Rust, nibble LUT: `head` is provisional.** head is the control — untouched by this commit — and drifted 90.3 -> 94.6 -> 98.0 across three back-to-back runs, which reads as thermal ramp rather than scatter. The four stages the commit touches are stable to 0.0 ms across the same runs. Total pending repeat runs.
+
+<!-- END device-table -->
+
+Everything above — table and chart — is generated from
+[`benchmarks/device.toml`](./benchmarks/device.toml) by `scripts/plot_stages.py`,
+so a re-measurement updates both at once and they cannot drift apart. Add a run,
+re-run the script; never hand-edit a figure here.
+
+The output head is now roughly **two-thirds of the remaining gap** and over half of
+runtime, while every other stage is within 1.5x of C. Closing it is the main open
+work. Methodology and per-lever detail: [BENCHMARKING.md](./BENCHMARKING.md).
 
 ### Correctness
 

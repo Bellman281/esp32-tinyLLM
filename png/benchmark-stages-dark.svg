@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="594" viewBox="0 0 860 594" font-family="ui-sans-serif,-apple-system,Segoe UI,Roboto,sans-serif">
+<defs><pattern id="prov" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="none"/><line x1="0" y1="0" x2="0" y2="6" stroke="#1a1a19" stroke-width="2" opacity="0.55"/></pattern></defs>
+<rect width="860" height="594" fill="#1a1a19"/>
+<text x="74" y="34" font-size="17" font-weight="600" fill="#ffffff">Per-stage inference cost, C vs Rust</text>
+<text x="74" y="55" font-size="12" fill="#c3c2b7">ESP32-S3 @ 240 MHz · 400 tokens, 18-token prompt · ms per token, lower is better</text>
+<text x="836" y="55" font-size="11" fill="#c3c2b7" text-anchor="end">hatched = provisional</text>
+<rect x="74" y="66" width="10" height="10" rx="2" fill="#3987e5"/>
+<text x="89" y="75" font-size="12" fill="#c3c2b7">C reference</text>
+<rect x="194.2" y="66" width="10" height="10" rx="2" fill="#d95926"/>
+<text x="209.2" y="75" font-size="12" fill="#c3c2b7">Rust, before</text>
+<rect x="321.6" y="66" width="10" height="10" rx="2" fill="#199e70"/>
+<text x="336.6" y="75" font-size="12" fill="#c3c2b7">Rust, nibble LUT</text>
+<line x1="74.0" y1="86" x2="74.0" y2="532" stroke="#33322f" stroke-width="1"/>
+<text x="74.0" y="550" font-size="11" fill="#c3c2b7" text-anchor="middle">0</text>
+<line x1="201.2" y1="86" x2="201.2" y2="532" stroke="#33322f" stroke-width="1"/>
+<text x="201.2" y="550" font-size="11" fill="#c3c2b7" text-anchor="middle">20</text>
+<line x1="328.4" y1="86" x2="328.4" y2="532" stroke="#33322f" stroke-width="1"/>
+<text x="328.4" y="550" font-size="11" fill="#c3c2b7" text-anchor="middle">40</text>
+<line x1="455.6" y1="86" x2="455.6" y2="532" stroke="#33322f" stroke-width="1"/>
+<text x="455.6" y="550" font-size="11" fill="#c3c2b7" text-anchor="middle">60</text>
+<line x1="582.8" y1="86" x2="582.8" y2="532" stroke="#33322f" stroke-width="1"/>
+<text x="582.8" y="550" font-size="11" fill="#c3c2b7" text-anchor="middle">80</text>
+<line x1="710.0" y1="86" x2="710.0" y2="532" stroke="#33322f" stroke-width="1"/>
+<text x="710.0" y="550" font-size="11" fill="#c3c2b7" text-anchor="middle">100</text>
+<text x="392.0" y="570" font-size="11.5" fill="#c3c2b7" text-anchor="middle">ms / token</text>
+<text x="62" y="129.0" font-size="12.5" font-weight="500" fill="#ffffff" text-anchor="end">input</text>
+<path d="M74,96 H97.98400000000001 A4,4 0 0 1 101.98400000000001,100 V110 A4,4 0 0 1 97.98400000000001,114 H74 Z" fill="#3987e5"/>
+<text x="109.0" y="109" font-size="11.5" fill="#c3c2b7">4.4</text>
+<path d="M74,116 H119.608 A4,4 0 0 1 123.608,120 V130 A4,4 0 0 1 119.608,134 H74 Z" fill="#d95926"/>
+<text x="130.6" y="129" font-size="11.5" fill="#c3c2b7">7.8</text>
+<path d="M74,136 H111.976 A4,4 0 0 1 115.976,140 V150 A4,4 0 0 1 111.976,154 H74 Z" fill="#199e70"/>
+<text x="123.0" y="149" font-size="11.5" fill="#c3c2b7">6.6</text>
+<text x="62" y="213.0" font-size="12.5" font-weight="500" fill="#ffffff" text-anchor="end">attn</text>
+<path d="M74,180 H342.844 A4,4 0 0 1 346.844,184 V194 A4,4 0 0 1 342.844,198 H74 Z" fill="#3987e5"/>
+<text x="353.8" y="193" font-size="11.5" fill="#c3c2b7">42.9</text>
+<path d="M74,200 H415.98400000000004 A4,4 0 0 1 419.98400000000004,204 V214 A4,4 0 0 1 415.98400000000004,218 H74 Z" fill="#d95926"/>
+<text x="427.0" y="213" font-size="11.5" fill="#c3c2b7">54.4</text>
+<path d="M74,220 H393.08799999999997 A4,4 0 0 1 397.08799999999997,224 V234 A4,4 0 0 1 393.08799999999997,238 H74 Z" fill="#199e70"/>
+<text x="404.1" y="233" font-size="11.5" fill="#c3c2b7">50.8</text>
+<text x="62" y="297.0" font-size="12.5" font-weight="500" fill="#ffffff" text-anchor="end">ffn</text>
+<path d="M74,264 H113.88400000000001 A4,4 0 0 1 117.88400000000001,268 V278 A4,4 0 0 1 113.88400000000001,282 H74 Z" fill="#3987e5"/>
+<text x="124.9" y="277" font-size="11.5" fill="#c3c2b7">6.9</text>
+<path d="M74,284 H145.68400000000003 A4,4 0 0 1 149.68400000000003,288 V298 A4,4 0 0 1 145.68400000000003,302 H74 Z" fill="#d95926"/>
+<text x="156.7" y="297" font-size="11.5" fill="#c3c2b7">11.9</text>
+<path d="M74,304 H134.236 A4,4 0 0 1 138.236,308 V318 A4,4 0 0 1 134.236,322 H74 Z" fill="#199e70"/>
+<text x="145.2" y="317" font-size="11.5" fill="#c3c2b7">10.1</text>
+<text x="62" y="381.0" font-size="12.5" font-weight="500" fill="#ffffff" text-anchor="end">ple</text>
+<path d="M74,348 H124.06 A4,4 0 0 1 128.06,352 V362 A4,4 0 0 1 124.06,366 H74 Z" fill="#3987e5"/>
+<text x="135.1" y="361" font-size="11.5" fill="#c3c2b7">8.5</text>
+<path d="M74,368 H166.67199999999997 A4,4 0 0 1 170.67199999999997,372 V382 A4,4 0 0 1 166.67199999999997,386 H74 Z" fill="#d95926"/>
+<text x="177.7" y="381" font-size="11.5" fill="#c3c2b7">15.2</text>
+<path d="M74,388 H150.772 A4,4 0 0 1 154.772,392 V402 A4,4 0 0 1 150.772,406 H74 Z" fill="#199e70"/>
+<text x="161.8" y="401" font-size="11.5" fill="#c3c2b7">12.7</text>
+<text x="62" y="465.0" font-size="12.5" font-weight="500" fill="#ffffff" text-anchor="end">head</text>
+<path d="M74,432 H433.156 A4,4 0 0 1 437.156,436 V446 A4,4 0 0 1 433.156,450 H74 Z" fill="#3987e5"/>
+<text x="444.2" y="445" font-size="11.5" fill="#c3c2b7">57.1</text>
+<path d="M74,452 H671.656 A4,4 0 0 1 675.656,456 V466 A4,4 0 0 1 671.656,470 H74 Z" fill="#d95926"/>
+<text x="682.7" y="465" font-size="11.5" fill="#c3c2b7">94.6</text>
+<path d="M74,472 H693.28 A4,4 0 0 1 697.28,476 V486 A4,4 0 0 1 693.28,490 H74 Z" fill="#199e70"/><path d="M74,472 H693.28 A4,4 0 0 1 697.28,476 V486 A4,4 0 0 1 693.28,490 H74 Z" fill="url(#prov)"/>
+<text x="704.3" y="485" font-size="11.5" fill="#c3c2b7">98.0</text>
+</svg>

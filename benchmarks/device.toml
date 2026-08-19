@@ -1,0 +1,71 @@
+# Measured on-device results — the single source for BENCHMARKING.md's per-stage
+# table and for png/benchmark-stages.svg. `scripts/plot_stages.py` reads this
+# file and emits both, so a figure cannot be updated in one place and left
+# stale in the other. That has already happened once in this repo's history:
+# see BENCHMARKING.md's "Why matched settings matter".
+#
+# ADD a [run.<id>] section per measurement. Do NOT edit an existing run to
+# "update" it — add a new one carrying its own commit and date, so the record of
+# what was measured, when, and against which tree survives. Mark a run
+# `provisional = 1` while its numbers are still being pinned down; the plotter
+# renders those with a hatched fill and the table footnotes them.
+#
+# Stage figures are the firmware's own `profile ms/token:` line. `wall_ms` is
+# the wall-clock per-token cost from the `--- N tokens in T s ---` line, which
+# runs ~2–3 ms/token above the profiled sum on both engines (token sampling,
+# argmax and serial output are outside the profiled stages). Quote tok/s from
+# `wall_ms`, never from the stage sum.
+#
+# FORMAT: the same restricted TOML subset model/models.toml uses — `key = value`
+# inside a [section], values being quoted strings or numbers, `#` starting a
+# comment. Kept inside that subset so a shell or Python reader needs no TOML
+# library.
+
+[settings]
+board       = "ESP32-S3-DevKitC N16R8, chip rev v0.2, dual LX7 @ 240 MHz, 8 MB PSRAM (OPI), 16 MB flash (QIO)"
+model       = "tinystories-v32768"
+model_sha256 = "3e5870b42d54e9f3a58b7b7d2a483b6f85170b5732bc1af6ac21a488a7fa7bbe"
+n_generate  = 400
+prompt_len  = 18
+note        = "attn is the only stage that scales with sequence position, so runs at different n_generate/prompt_len are NOT comparable. benchmark_settings_match.rs gates both firmwares to these values."
+
+[run.c]
+label   = "C reference"
+engine  = "c"
+date    = "2026-08-05"
+commit  = "reference-c/firmware/esp32_llm, arduino-esp32 3.3.10, -O3"
+input   = 4.4
+attn    = 42.9
+ffn     = 6.9
+ple     = 8.5
+head    = 57.1
+wall_ms = 122.0
+tok_s   = 8.20
+
+[run.rust-before]
+label   = "Rust, before"
+engine  = "rust"
+date    = "2026-08-19"
+commit  = "feat/ple-v2-header (c7f2ce7)"
+input   = 7.8
+attn    = 54.4
+ffn     = 11.9
+ple     = 15.2
+head    = 94.6
+wall_ms = 187.2
+tok_s   = 5.34
+
+[run.rust-after]
+label   = "Rust, nibble LUT"
+engine  = "rust"
+date    = "2026-08-19"
+commit  = "perf/nibble-lut (58ec1ed)"
+provisional_stages = "head"
+note    = "head is the control — untouched by this commit — and drifted 90.3 -> 94.6 -> 98.0 across three back-to-back runs, which reads as thermal ramp rather than scatter. The four stages the commit touches are stable to 0.0 ms across the same runs. Total pending repeat runs."
+input   = 6.6
+attn    = 50.8
+ffn     = 10.1
+ple     = 12.7
+head    = 98.0
+wall_ms = 181.6
+tok_s   = 5.51

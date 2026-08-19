@@ -13,7 +13,8 @@ that one for the numbers, this one for the plan.
 - Runs on an ESP32-S3-DevKitC (N16R8) and produces **byte-identical output
   to the C firmware** over 400 tokens.
 - Host parity suite green: 17 tests, 15 under `--features int8-activations`.
-- **1.50x slower than C** overall (179.6 vs 119.8 ms/token), measured on one
+- **~1.49x slower than C** overall (178.2 vs 119.8 ms/token) after the
+  nibble-LUT change; 1.50x (179.6) before it — measured on one
   board, same evening, same `model.bin`.
 - Phases 0–3 done. Phases 4 (display), 5 (bandwidth bench), 6 (drop
   FreeRTOS) not started.
@@ -46,7 +47,7 @@ reproducible. Also settles the hook's cost as a side effect — see below.
 
 ### 2. Port `bandwidth_bench` (Phase 5)
 
-**The head is +33.2 ms — 56% of the whole gap — and we don't know why.**
+**The head is +40.9 ms — roughly two-thirds of the whole gap — and we don't know why.**
 
 The belief that it's PSRAM-bandwidth-bound rests on a single data point:
 widening the external-memory caches moved it −21%, more than any other
@@ -71,7 +72,7 @@ Order depends on what #2 says.
 
 | # | Work | Targets | Notes |
 |---|---|---|---|
-| 3 | **`head-simd`** — esp-dsp int8 dot product for the output head | head, +33.2 ms (1.58x) | Only worth doing if #2 says compute-bound. Much simpler than the fp32 case: int8 accumulation is associative, so SIMD reordering is provably lossless — no tolerance question at all. Was drafted once and dropped from `main` as unverified; see `git log` around v0.1.0. |
+| 3 | **`head-simd`** — esp-dsp int8 dot product for the output head | head, +40.9 ms (1.72x) | Only worth doing if #2 says compute-bound. Much simpler than the fp32 case: int8 accumulation is associative, so SIMD reordering is provably lossless — no tolerance question at all. Was drafted once and dropped from `main` as unverified; see `git log` around v0.1.0. |
 | 4 | **`matvec-simd`** — esp-dsp fp32 matvec | ple 1.79x, input 1.77x, ffn 1.72x — together +15.1 ms | Worst *ratios*. Scaffolding already ships: the `matvec_override` hook, `QT::matvec_range_chunked`, and a measured drift bound (`matvec_simd_tolerance.rs`). Real risk: an FFI call per row, at rows of only 66–128 elements, may cost more than it saves. Not a guaranteed win. |
 | 5 | **`FVec::get`** | input + ple stages | Cheapest concrete item here. `tensor.rs`'s own doc comment flags it: four separately bounds-checked byte loads plus `from_le_bytes` per element, inside `rmsnorm`'s hot loop — which lives in the two stages with the worst ratios. Correctness is host-testable; the win needs hardware. |
 
