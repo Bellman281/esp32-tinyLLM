@@ -26,7 +26,7 @@ that smaller file instead. See "A real inconsistency in this repo" below.
 | File | What it is |
 |---|---|
 | `model.bin` | The trained, quantized model weights. Group-128 ragged int4 weights + fp16 group scales, tied input/output embedding. Config `V=32768 D=96 L=6 H=4 F=66 P=128 seq_len=512 group=128`, parsed directly from the file header. 14.91 MB. |
-| `vocab.h` | The tokenizer's token-id → UTF-8 bytes table, 32,768 entries — matches this `model.bin`'s vocab size. Generated data, not logic. |
+| `vocab.h` | The tokenizer's token-id → UTF-8 bytes table, **25,353** entries (`VOCAB_N`). Generated data, not logic. Note this is *not* the 32,768 in `model.bin`'s header — see "Two different vocab numbers" below. |
 | `val_v32768.bin` | A stream of validation tokens (vocab size 32,768) used to compute cross-entropy/perplexity in the `ppl` parity tests (`engine/llm-host/tests/ppl_parity.rs`), which load this exact model. |
 | `models.toml` | **The model registry** — the single place naming which model files exist, where they live, and what each is expected to produce. Read by Rust (`llm_host::manifest`) and by the C-side tooling (`scripts/model.sh`), so both get their paths, prompt ids, window counts, and expected cross-entropy from one source. See the top-level README's "The model registry". |
 
@@ -61,6 +61,32 @@ actually flashed to hardware. The perplexity and CLI parity tests
 for *this* model is covered — just not by the fp32-precision golden-logit
 check. A golden run for this model (dump PyTorch logits for a fixed prompt
 via `slvDev/esp32-ai`'s export tooling) would close that gap.
+
+## Two different vocab numbers
+
+`model.bin`'s header says `V=32768`. `vocab.h` says `VOCAB_N 25353`. Both are
+right, and they mean different things:
+
+| number | what it is |
+|---|---|
+| **32,768** | rows in the token embedding and the PLE table. This is what `V` in the header means, and what `V * P * L` = 25M PLE parameters is computed from. |
+| **25,353** | entries the tokenizer actually has — the only ids that can ever be produced or decoded. |
+
+The upstream pipeline asks for a 32,768-token BPE (`prepare.py --vocab 32768`,
+trained on a 40 MB slice) but the tokenizer it produced has 25,353 entries. The
+model is still built with `vocab_size=32768`, leaving rows 25353–32767 padded
+and untrained. The likely cause is the BPE trainer exhausting useful merge
+candidates before reaching the target — TinyStories' effective vocabulary is
+small — but that is inferred from the artifacts, not measured; re-running
+`prepare.py` would confirm it. They are never scored on-device because no id above 25,352 can be
+emitted — but the output head does compute all 32,768 logits, so roughly 23% of
+the head's work is spent on rows that can never win. The head is already the
+largest single term in the C-vs-Rust gap (see
+[`BENCHMARKING.md`](../BENCHMARKING.md)), which makes this worth knowing.
+
+Upstream's current export format carries `output_vocab` separately from
+`input_vocab` precisely so a runtime can skip that work. This repo's readers
+predate it — see [`TRAINING.md`](../TRAINING.md)'s "The export format gap".
 
 ## Architecture
 
