@@ -27,6 +27,14 @@ here regenerates `model.bin`, `vocab.h`, or `golden.txt` — they're consumed
 as-is, produced upstream. See [`MIGRATION_PLAN.md`](./MIGRATION_PLAN.md)
 for the full reasoning and the ground rules this port follows.
 
+That pipeline is now *documented and vendored* here for reference, without
+becoming part of any build: [`TRAINING.md`](./TRAINING.md) walks it end to end
+(dataset → tokenizer → training → 4-bit PTQ → export → `vocab.h`), and
+[`training/`](./training/) holds the upstream Python unmodified, under the same
+refresh-don't-patch rule `reference-c/` lives under. It also records a real open
+blocker: the current upstream exporter writes a header format this repo's
+readers reject.
+
 ## Status
 
 | Phase | What | Status |
@@ -165,6 +173,10 @@ esp32-tinyLLM/
                                what to optimize next
   ROADMAP.md               <- what to do next, in order, and what's still
                                unexplained
+  TRAINING.md              <- how model.bin was made: dataset -> tokenizer ->
+                               training -> 4-bit PTQ -> export -> vocab.h
+  training/                <- that pipeline's Python, vendored unmodified from
+                               slvDev/esp32-ai (reference only, not built)
   model/                    <- trained model, dataset docs, and models.toml
                                (the registry both C and Rust read)
   scripts/                  <- model.sh, the C side's registry reader
