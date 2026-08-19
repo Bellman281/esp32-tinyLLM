@@ -13,7 +13,7 @@ configs (default = fp32-activations, `--features int8-activations`):
 - `cli_parity.rs` — `host-generate`'s stdout vs a byte-for-byte capture of
   the compiled C `host_generate.c` binary (same model, same hardcoded
   prompt, default N=120). Passes under both build configs.
-- `ppl_parity.rs` — cross-entropy over `data/val_v32768.bin` vs captured C
+- `ppl_parity.rs` — cross-entropy over `model/tinystories-v32768/val.bin` vs captured C
   reference values. fp32: exact match. int8: within a tolerance set from
   the empirically measured float non-associativity noise floor (rebuilding
   the C reference with `-march=native` instead of `-O2` alone shifts its

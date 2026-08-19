@@ -6,9 +6,16 @@ vendored under [`training/`](./training/) (provenance and the refresh rule are
 in [`training/README.md`](./training/README.md)); this file is the walkthrough.
 
 Nothing in the Rust engine depends on any of this. `model.bin` and `vocab.h` are
-consumed as-is, and the registry ([`model/models.toml`](./model/models.toml)) is
-what points at them. This document exists so that "where did these files come
-from, and how do I make another one?" has an answer inside the repo.
+consumed as static inputs, and the registry
+([`model/models.toml`](./model/models.toml)) is what points at them. This
+document exists so that "where did these files come from, and how do I make
+another one?" has an answer inside the repo.
+
+**The shipped model was trained for this repo**, not downloaded: 2 August 2026,
+on a rented VPS GPU, by this repo's author, running the pipeline below. It is a
+different artifact from upstream's published release — see
+[`model/README.md`](./model/README.md) for the two checksums and why they differ
+by exactly 16 bytes.
 
 > **Read this first if you plan to run the exporter.** The pipeline below
 > reproduces every artifact *except* `model.bin` itself. The current upstream
@@ -34,7 +41,8 @@ Read straight out of `reference-c/esp32-llm-lab/model.bin`'s header and
 | Norms | fp32 |
 | Head | tied to the input embedding |
 | Corpus | [TinyStories](https://arxiv.org/abs/2305.07759) (Eldan & Li, 2023), first 300 MiB of the HF train split |
-| File | 14.91 MB, sha256 `3e5870b4…7fa7bbe` |
+| Trained | 2 August 2026, rented VPS GPU, by this repo's author |
+| File | `model/tinystories-v32768/model.bin`, 14.91 MB, sha256 `3e5870b4…7fa7bbe` |
 
 > `model/README.md` currently says `vocab.h` has "32,768 entries — matches this
 > `model.bin`'s vocab size". It has 25,353. The 32,768 is the embedding row
@@ -75,8 +83,8 @@ between models sharing a tokenizer.
 pinned to a dataset revision and training sets no determinism flags. You will
 land on comparable numbers, not identical bytes.
 
-`data/val_v32768.bin` in this repo — the validation tokens `ppl_parity.rs` reads
-— is a copy of the `val.bin` this step produces.
+`model/tinystories-v32768/val.bin` — the validation tokens `ppl_parity.rs`
+reads — is the `val.bin` this step produces.
 
 ## 2. Train
 
@@ -224,7 +232,7 @@ produces that missing golden as a side effect.
 cd training
 uv run python tools/generate_vocab.py \
   --tokenizer ../demo/bpe32768.json \
-  --out ../reference-c/esp32-llm-lab/vocab.h
+  --out ../model/tinystories-v32768/vocab.h
 ```
 
 Pass both flags — the vendored script's defaults point at the upstream sketch
@@ -246,14 +254,16 @@ that produced the shipped decode table.
 Per CONTRIBUTING ground rule 4, nothing hardcodes a path. Add a section to
 [`model/models.toml`](./model/models.toml):
 
+Drop the artifacts into `model/<name>/`, matching the section name:
+
 ```toml
 [my-model]
 description = "..."
-bin         = "path/to/model.bin"
+bin         = "model/my-model/model.bin"
 bin_sha256  = "..."
-vocab       = "path/to/vocab.h"
-val_tokens  = "path/to/val.bin"
-golden      = "path/to/golden.txt"     # if you have one
+vocab       = "model/my-model/vocab.h"
+val_tokens  = "model/my-model/val.bin"
+golden      = "model/my-model/golden.txt"   # if you have one
 prompt_ids  = [433, 447, 259, 405]
 n_generate  = 400
 ppl_windows = 4

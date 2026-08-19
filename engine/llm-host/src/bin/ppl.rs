@@ -19,7 +19,7 @@ fn main() {
     let val_path = args
         .get(2)
         .map(String::as_str)
-        .unwrap_or("data/val_v32768.bin");
+        .unwrap_or("model/tinystories-v32768/val.bin");
     let windows: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(8);
 
     let bytes = fs::read(model_path).unwrap_or_else(|e| {

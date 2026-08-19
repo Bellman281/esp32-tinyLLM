@@ -20,20 +20,25 @@ Trained model, dataset, and architecture: [`model/`](./model/).
 quantized-transformer math, the ESP32 firmware, the host-side correctness
 tooling.
 
-**Out of scope, deliberately:** training, quantization, and model export
-stay exactly where they are, in Python, in
-[`slvDev/esp32-ai`](https://github.com/slvDev/esp32-ai). Nothing
-here regenerates `model.bin`, `vocab.h`, or `golden.txt` — they're consumed
-as-is, produced upstream. See [`MIGRATION_PLAN.md`](./MIGRATION_PLAN.md)
-for the full reasoning and the ground rules this port follows.
+**Out of scope, deliberately:** the training/quantization/export *pipeline*
+stays in Python, upstream, in
+[`slvDev/esp32-ai`](https://github.com/slvDev/esp32-ai). No build target here
+runs it, and `model.bin` / `vocab.h` are consumed as static inputs. See
+[`MIGRATION_PLAN.md`](./MIGRATION_PLAN.md) for the full reasoning and the
+ground rules this port follows.
 
-That pipeline is now *documented and vendored* here for reference, without
-becoming part of any build: [`TRAINING.md`](./TRAINING.md) walks it end to end
-(dataset → tokenizer → training → 4-bit PTQ → export → `vocab.h`), and
-[`training/`](./training/) holds the upstream Python unmodified, under the same
-refresh-don't-patch rule `reference-c/` lives under. It also records a real open
-blocker: the current upstream exporter writes a header format this repo's
-readers reject.
+The pipeline is *documented and vendored* for reference:
+[`TRAINING.md`](./TRAINING.md) walks it end to end (dataset → tokenizer →
+training → 4-bit PTQ → export → `vocab.h`), and [`training/`](./training/)
+holds the upstream Python unmodified, under the same refresh-don't-patch rule
+`reference-c/` lives under. It also records a real open blocker: the current
+upstream exporter writes a header format this repo's readers reject.
+
+**The model itself was trained for this repo**, not downloaded — 2 August
+2026, on a rented VPS GPU, using that pipeline. It lives in
+[`model/tinystories-v32768/`](./model/), which is canonical; see
+[`model/README.md`](./model/README.md) for provenance and for how to add a
+second model.
 
 ## Status
 
@@ -180,14 +185,14 @@ esp32-tinyLLM/
                                training -> 4-bit PTQ -> export -> vocab.h
   training/                <- that pipeline's Python, vendored unmodified from
                                slvDev/esp32-ai (reference only, not built)
-  model/                    <- trained model, dataset docs, and models.toml
-                               (the registry both C and Rust read)
+  model/                    <- this repo's trained models, one folder per
+                               registry entry, plus models.toml (the registry
+                               both C and Rust read) and dataset docs
   scripts/                  <- model.sh, the C side's registry reader
   demo/                     <- interactive CLI demo (Python REPL over either
                                engine — chat.py drives C, chat_rust.py Rust)
   reference-c/             <- the C/C++ engine this port is checked against
                                (build-fix edits only — see its own README)
-  data/                     <- validation tokens for the ppl parity test
   engine/                  <- the Rust workspace
     llm-core/                 no_std, platform-agnostic model math (Phase 1)
     llm-host/                 std CLI tools + correctness tests (Phase 2)

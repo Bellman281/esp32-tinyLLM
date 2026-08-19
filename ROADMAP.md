@@ -125,11 +125,15 @@ applies to the embedded vocab (`assets/vocab_*.bin`, currently regenerated
 by hand via `vocab-to-bin`). Bigger change; eliminates a bug class that has
 already bitten this project once.
 
-**10. The 16.5 MB duplication.** `model/model.bin` is byte-identical to
-`reference-c/esp32-llm-lab/model.bin`, and both are tracked; likewise
-`vocab.h` and `val_v32768.bin`. It's documented as a deliberate convenience
-copy, but now that `model/models.toml` is the pointer, the copies have no
-consumer.
+**10. The 16.5 MB duplication — resolved, partly.** `model/` is now the
+canonical home: `model/tinystories-v32768/{model.bin, vocab.h, val.bin}`, one
+folder per registry entry, and `data/` is gone. What remains duplicated is
+`reference-c/esp32-llm-lab/`'s own `model.bin` and `vocab.h` (~15.7 MB), and
+that is deliberate — `reference-c/` is a frozen mirror refreshed wholesale
+(CONTRIBUTING ground rule 1), and `gen_prompt.c` `#include`s that `vocab.h` at
+compile time. Nothing in the registry points at them. Removing it would mean
+either patching the mirror or breaking the C build, so it stays until the C
+reference itself is retired.
 
 ## Phases 4 and 6
 

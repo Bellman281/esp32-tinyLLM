@@ -29,10 +29,10 @@ default = "tinystories-v32768"
 # in the top-level README describes and the one flashed to hardware.
 [tinystories-v32768]
 description = "28.9M-param PLE TinyLM (Gemma-style Per-Layer Embeddings), TinyStories corpus"
-bin         = "reference-c/esp32-llm-lab/model.bin"
+bin         = "model/tinystories-v32768/model.bin"
 bin_sha256  = "3e5870b42d54e9f3a58b7b7d2a483b6f85170b5732bc1af6ac21a488a7fa7bbe"
-vocab       = "reference-c/esp32-llm-lab/vocab.h"
-val_tokens  = "data/val_v32768.bin"
+vocab       = "model/tinystories-v32768/vocab.h"
+val_tokens  = "model/tinystories-v32768/val.bin"
 
 # Config is NOT repeated here on purpose: `model.bin`'s own header carries
 # `V D L H F P seq_len group rope_theta`, and both `llm_load` (C) and
