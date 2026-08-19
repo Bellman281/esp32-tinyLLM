@@ -35,8 +35,8 @@ fn rms_inv(x: &[f32], n: usize) -> f32 {
 /// out` (e.g. `rmsnorm(s->x, attn_norm, D, s->h)`).
 pub fn rmsnorm(x: &[f32], w: FVec, n: usize, out: &mut [f32]) {
     let inv = rms_inv(x, n);
-    for (i, (&xv, ov)) in x[..n].iter().zip(out[..n].iter_mut()).enumerate() {
-        *ov = w.get(i) * xv * inv;
+    for ((&xv, ov), wv) in x[..n].iter().zip(out[..n].iter_mut()).zip(w.iter(n)) {
+        *ov = wv * xv * inv;
     }
 }
 
@@ -47,8 +47,8 @@ pub fn rmsnorm(x: &[f32], w: FVec, n: usize, out: &mut [f32]) {
 /// arithmetic, same result.
 pub fn rmsnorm_inplace(buf: &mut [f32], w: FVec, n: usize) {
     let inv = rms_inv(buf, n);
-    for (i, bv) in buf[..n].iter_mut().enumerate() {
-        *bv = w.get(i) * *bv * inv;
+    for (bv, wv) in buf[..n].iter_mut().zip(w.iter(n)) {
+        *bv = wv * *bv * inv;
     }
 }
 

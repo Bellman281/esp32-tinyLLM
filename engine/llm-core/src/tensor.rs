@@ -82,6 +82,34 @@ pub fn quantize_activations(x: &[f32], iq: &mut [i8]) -> f32 {
     xmax / 127.0f32
 }
 
+/// Signed int4 code (`nibble - 8`, i.e. -8.0..=7.0) as `f32`, indexed by the
+/// raw 0..=15 nibble.
+///
+/// PERFORMANCE NOTE: every fp32 unpack site below used to compute this as
+/// `(nibble as i32 - 8) as f32` -- an integer subtract plus an
+/// integer-to-float conversion, per element, on loops that run
+/// `rows * cols` times per token (3.1M times for the output head alone on
+/// the shipped model). The table replaces both with a single load from 64
+/// bytes that stay resident in L1 (and, on the ESP32-S3, in the same cache
+/// the model already streams through). Bit-identical by construction: every
+/// value -8..=7 is exactly representable in `f32`, so the table entry and
+/// the arithmetic it replaces are the same float, not merely close.
+///
+/// Measured on an x86-64 host against the previous arithmetic form, whole
+/// tensors, output asserted bit-for-bit identical: output head 4.04ms ->
+/// 3.07ms per call (-24%), `qkv` 35.2us -> 27.0us, `gate` 7.9us -> 6.2us,
+/// `ple_proj` 15.4us -> 12.8us. NOT measured on hardware -- the Xtensa
+/// backend and the LX7's cache are a separate question, and BENCHMARKING.md
+/// is the place that answer belongs once a board has run it.
+const NIBBLE_F32: [f32; 16] = [
+    -8.0, -7.0, -6.0, -5.0, -4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0,
+];
+
+/// Integer counterpart of `NIBBLE_F32`, for the int8-activation path and
+/// `unpack_row_int8` (which want the code as an integer, not a float).
+/// Saves the `- 8` per element; same values, so bit-identical.
+const NIBBLE_I8: [i8; 16] = [-8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadError {
     TooShort,
@@ -149,23 +177,38 @@ impl<'a> QT<'a> {
         half::f16::from_bits(bits).to_f32()
     }
 
-    /// Signed code (value - 8, i.e. -8..=7) at logical column `j` of row `r`.
-    #[inline]
-    fn code(&self, r: usize, j: usize) -> i32 {
-        let byte = self.codes[r * self.row_bytes + (j >> 1)];
-        let nibble = if j & 1 == 1 { byte >> 4 } else { byte & 0xF };
-        nibble as i32 - 8
-    }
-
     /// Dequantize row `r` into `out` (len == self.cols). Ports `deq_row`.
     pub fn deq_row(&self, r: usize, out: &mut [f32]) {
         debug_assert!(out.len() >= self.cols);
+        let row = &self.codes[r * self.row_bytes..(r + 1) * self.row_bytes];
+        // Two elements per packed byte, the same shape `matvec_range` uses
+        // and for the same reason -- this went through a `code(r, j)`
+        // helper once per element, re-deriving `r * row_bytes`, re-loading
+        // the same byte for each nibble of a pair, and branching on `j & 1`
+        // every step. Same values, same order, bit-identical output.
         for gi in 0..self.n_groups {
             let begin = gi * self.group;
             let end = core::cmp::min(begin + self.group, self.cols);
             let scale = self.scale(r, gi);
-            for j in begin..end {
-                out[j] = self.code(r, j) as f32 * scale;
+            let mut j = begin;
+            if j & 1 == 1 && j < end {
+                out[j] = NIBBLE_F32[(row[j >> 1] >> 4) as usize] * scale;
+                j += 1;
+            }
+            let pairs = (end - j) / 2;
+            if pairs > 0 {
+                let bytes = &row[j >> 1..(j >> 1) + pairs];
+                let outs = &mut out[j..j + 2 * pairs];
+                for (b, op) in bytes.iter().zip(outs.chunks_exact_mut(2)) {
+                    op[0] = NIBBLE_F32[(b & 0xF) as usize] * scale;
+                    op[1] = NIBBLE_F32[(b >> 4) as usize] * scale;
+                }
+                j += 2 * pairs;
+            }
+            if j < end {
+                let byte = row[j >> 1];
+                let nib = if j & 1 == 1 { byte >> 4 } else { byte & 0xF };
+                out[j] = NIBBLE_F32[nib as usize] * scale;
             }
         }
     }
@@ -219,20 +262,30 @@ impl<'a> QT<'a> {
                 let mut group_acc = 0f32;
                 let mut j = begin;
                 if j & 1 == 1 && j < end {
-                    let byte = row[j >> 1];
-                    group_acc += ((byte >> 4) as i32 - 8) as f32 * x[j];
+                    group_acc += NIBBLE_F32[(row[j >> 1] >> 4) as usize] * x[j];
                     j += 1;
                 }
-                while j + 1 < end {
-                    let byte = row[j >> 1];
-                    group_acc += ((byte & 0xF) as i32 - 8) as f32 * x[j];
-                    group_acc += ((byte >> 4) as i32 - 8) as f32 * x[j + 1];
-                    j += 2;
+                // Steady state: one packed byte -> two elements, driven by a
+                // `zip` over two slices of a provably matching length rather
+                // than by `j`. Indexing `row[j >> 1]` / `x[j]` / `x[j + 1]`
+                // against runtime-derived bounds made the backend re-prove
+                // three ranges per iteration; sliced up front it has to prove
+                // nothing. Iteration order, and therefore the f32 summation
+                // order, is exactly what the indexed loop produced.
+                let pairs = (end - j) / 2;
+                if pairs > 0 {
+                    let bytes = &row[j >> 1..(j >> 1) + pairs];
+                    let xs = &x[j..j + 2 * pairs];
+                    for (b, xp) in bytes.iter().zip(xs.chunks_exact(2)) {
+                        group_acc += NIBBLE_F32[(b & 0xF) as usize] * xp[0];
+                        group_acc += NIBBLE_F32[(b >> 4) as usize] * xp[1];
+                    }
+                    j += 2 * pairs;
                 }
                 if j < end {
                     let byte = row[j >> 1];
-                    let code = if j & 1 == 1 { (byte >> 4) as i32 } else { (byte & 0xF) as i32 };
-                    group_acc += (code - 8) as f32 * x[j];
+                    let nib = if j & 1 == 1 { byte >> 4 } else { byte & 0xF };
+                    group_acc += NIBBLE_F32[nib as usize] * x[j];
                 }
                 acc += group_acc * scale;
             }
@@ -295,8 +348,8 @@ impl<'a> QT<'a> {
                 let mut lanes = [0f32; LANES];
                 for j in begin..end {
                     let byte = row[j >> 1];
-                    let code = if j & 1 == 1 { (byte >> 4) as i32 } else { (byte & 0xF) as i32 };
-                    lanes[(j - begin) % LANES] += (code - 8) as f32 * x[j];
+                    let nib = if j & 1 == 1 { byte >> 4 } else { byte & 0xF };
+                    lanes[(j - begin) % LANES] += NIBBLE_F32[nib as usize] * x[j];
                 }
                 let mut group_acc = 0f32;
                 for l in lanes.iter() {
@@ -326,8 +379,22 @@ impl<'a> QT<'a> {
     /// use `deq_row` for that case instead.
     pub fn unpack_row_int8(&self, r: usize, out: &mut [i8]) -> f32 {
         debug_assert!(out.len() >= self.cols);
-        for j in 0..self.cols {
-            out[j] = self.code(r, j) as i8;
+        let row = &self.codes[r * self.row_bytes..(r + 1) * self.row_bytes];
+        // Two elements per packed byte, same shape as `deq_row`/`matvec_range`
+        // (this was the last remaining per-element `code(r, j)` site). Runs
+        // `out_vocab * cols` times at boot when `llm-firmware` stages the
+        // output head into PSRAM, so this is boot latency, not per-token
+        // cost. Same values, same order.
+        let pairs = self.cols / 2;
+        for (b, op) in row[..pairs].iter().zip(out[..2 * pairs].chunks_exact_mut(2)) {
+            op[0] = NIBBLE_I8[(b & 0xF) as usize];
+            op[1] = NIBBLE_I8[(b >> 4) as usize];
+        }
+        if self.cols & 1 == 1 {
+            let j = self.cols - 1;
+            let byte = row[j >> 1];
+            let nib = if j & 1 == 1 { byte >> 4 } else { byte & 0xF };
+            out[j] = NIBBLE_I8[nib as usize];
         }
         self.scale(r, 0)
     }
@@ -381,20 +448,23 @@ impl<'a> QT<'a> {
                 let mut g: i32 = 0;
                 let mut j = begin;
                 if j & 1 == 1 && j < end {
-                    let byte = row[j >> 1];
-                    g += ((byte >> 4) as i32 - 8) * iq[j] as i32;
+                    g += NIBBLE_I8[(row[j >> 1] >> 4) as usize] as i32 * iq[j] as i32;
                     j += 1;
                 }
-                while j + 1 < end {
-                    let byte = row[j >> 1];
-                    g += ((byte & 0xF) as i32 - 8) * iq[j] as i32;
-                    g += ((byte >> 4) as i32 - 8) * iq[j + 1] as i32;
-                    j += 2;
+                let pairs = (end - j) / 2;
+                if pairs > 0 {
+                    let bytes = &row[j >> 1..(j >> 1) + pairs];
+                    let acts = &iq[j..j + 2 * pairs];
+                    for (b, ap) in bytes.iter().zip(acts.chunks_exact(2)) {
+                        g += NIBBLE_I8[(b & 0xF) as usize] as i32 * ap[0] as i32;
+                        g += NIBBLE_I8[(b >> 4) as usize] as i32 * ap[1] as i32;
+                    }
+                    j += 2 * pairs;
                 }
                 if j < end {
                     let byte = row[j >> 1];
-                    let code = if j & 1 == 1 { (byte >> 4) as i32 } else { (byte & 0xF) as i32 };
-                    g += (code - 8) * iq[j] as i32;
+                    let nib = if j & 1 == 1 { byte >> 4 } else { byte & 0xF };
+                    g += NIBBLE_I8[nib as usize] as i32 * iq[j] as i32;
                 }
                 acc += g as f32 * self.scale(r, gi);
             }
@@ -424,6 +494,24 @@ impl<'a> FVec<'a> {
             self.bytes[off + 2],
             self.bytes[off + 3],
         ])
+    }
+
+    /// The first `n` elements, in order.
+    ///
+    /// Prefer this over `get(i)` in a loop. `get` indexes four separate
+    /// bytes and bounds-checks each one, so a sequential walk pays four
+    /// checks and a byte-assembly per element -- next to C's `const float
+    /// *`, which is one load. Iterating `chunks_exact(4)` instead gives the
+    /// backend a provable stride and one `from_le_bytes` per element, which
+    /// lowers to a single (unaligned) 32-bit load on both x86-64 and
+    /// Xtensa. Same values, and still no assumption that the model buffer
+    /// is 4-byte aligned at this offset -- which is the reason `FVec` reads
+    /// bytes rather than reinterpret-casting in the first place.
+    #[inline]
+    pub fn iter(&self, n: usize) -> impl Iterator<Item = f32> + 'a {
+        self.bytes[..n * 4]
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
     }
 }
 
