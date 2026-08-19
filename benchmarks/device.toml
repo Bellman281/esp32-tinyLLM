@@ -28,6 +28,7 @@ model_sha256 = "3e5870b42d54e9f3a58b7b7d2a483b6f85170b5732bc1af6ac21a488a7fa7bbe
 n_generate  = 400
 prompt_len  = 18
 note        = "attn is the only stage that scales with sequence position, so runs at different n_generate/prompt_len are NOT comparable. benchmark_settings_match.rs gates both firmwares to these values."
+reproducibility = "A given binary reproduces exactly on this board: two independent hard-reset runs of each of the two Rust binaries below returned the same wall clock to 0.01 s and the same per-stage figures to 0.1 ms, matching what the C firmware already did across three runs. So a single run per binary is enough, and there is no run-to-run noise floor to hide behind -- a per-stage difference between two binaries is real even in a stage neither of them touched. See BENCHMARKING.md, 'Reproducibility and the layout tax'."
 
 [run.c]
 label   = "C reference"
@@ -60,8 +61,7 @@ label   = "Rust, nibble LUT"
 engine  = "rust"
 date    = "2026-08-19"
 commit  = "perf/nibble-lut (58ec1ed)"
-provisional_stages = "head"
-note    = "head is the control — untouched by this commit — and drifted 90.3 -> 94.6 -> 98.0 across three back-to-back runs, which reads as thermal ramp rather than scatter. The four stages the commit touches are stable to 0.0 ms across the same runs. Total pending repeat runs."
+note    = "head rose 94.6 -> 98.0 despite this commit not touching head.rs. Reproducible, not noise: both binaries were re-run from a hard reset and returned identical figures. Read as a code/data layout effect -- the commit adds two lookup tables and reshapes four loops in llm-core, and head streams 2.43 MB through a 64 KB cache every token, so instruction and rodata placement move it. The same thing cost 4.3 ms across c7f2ce7 (90.3 -> 94.6), which also does not touch head.rs. Net is still -5.7 ms: -9.1 across the four stages this commit does touch, +3.4 of layout tax on one it does not."
 input   = 6.6
 attn    = 50.8
 ffn     = 10.1

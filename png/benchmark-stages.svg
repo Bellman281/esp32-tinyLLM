@@ -3,7 +3,6 @@
 <rect width="860" height="594" fill="#fcfcfb"/>
 <text x="74" y="34" font-size="17" font-weight="600" fill="#0b0b0b">Per-stage inference cost, C vs Rust</text>
 <text x="74" y="55" font-size="12" fill="#52514e">ESP32-S3 @ 240 MHz · 400 tokens, 18-token prompt · ms per token, lower is better</text>
-<text x="836" y="55" font-size="11" fill="#52514e" text-anchor="end">hatched = provisional</text>
 <rect x="74" y="66" width="10" height="10" rx="2" fill="#2a78d6"/>
 <text x="89" y="75" font-size="12" fill="#52514e">C reference</text>
 <rect x="194.2" y="66" width="10" height="10" rx="2" fill="#eb6834"/>
@@ -56,6 +55,6 @@
 <text x="444.2" y="445" font-size="11.5" fill="#52514e">57.1</text>
 <path d="M74,452 H671.656 A4,4 0 0 1 675.656,456 V466 A4,4 0 0 1 671.656,470 H74 Z" fill="#eb6834"/>
 <text x="682.7" y="465" font-size="11.5" fill="#52514e">94.6</text>
-<path d="M74,472 H693.28 A4,4 0 0 1 697.28,476 V486 A4,4 0 0 1 693.28,490 H74 Z" fill="#1baf7a"/><path d="M74,472 H693.28 A4,4 0 0 1 697.28,476 V486 A4,4 0 0 1 693.28,490 H74 Z" fill="url(#prov)"/>
+<path d="M74,472 H693.28 A4,4 0 0 1 697.28,476 V486 A4,4 0 0 1 693.28,490 H74 Z" fill="#1baf7a"/>
 <text x="704.3" y="485" font-size="11.5" fill="#52514e">98.0</text>
 </svg>

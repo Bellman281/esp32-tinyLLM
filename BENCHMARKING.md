@@ -33,12 +33,10 @@ either firmware drifts from them.
 |---|---|---|---|---|---|---|---|
 | **C reference** | 4.4 | 42.9 | 6.9 | 8.5 | 57.1 | **119.8** | 8.20 |
 | **Rust, before** | 7.8 | 54.4 | 11.9 | 15.2 | 94.6 | **183.9** | 5.34 |
-| **Rust, nibble LUT** | 6.6 | 50.8 | 10.1 | 12.7 | 98.0 † | **178.2** | 5.51 |
+| **Rust, nibble LUT** | 6.6 | 50.8 | 10.1 | 12.7 | 98.0 | **178.2** | 5.51 |
 | ratio vs C reference | 1.50x | 1.18x | 1.46x | 1.49x | 1.72x | **1.49x** | |
 | absolute gap | +2.2 | +7.9 | +3.2 | +4.2 | +40.9 | +58.4 | |
 | **change this brought** | -1.2 | -3.6 | -1.8 | -2.5 | +3.4 | **-5.7** | |
-
-† **Rust, nibble LUT: `head` is provisional.** head is the control — untouched by this commit — and drifted 90.3 -> 94.6 -> 98.0 across three back-to-back runs, which reads as thermal ramp rather than scatter. The four stages the commit touches are stable to 0.0 ms across the same runs. Total pending repeat runs.
 
 <!-- END device-table -->
 
@@ -74,6 +72,37 @@ implementations of the same math, including the dual-core int8-staged head,
 agreeing token for token on real silicon. Boot diagnostics agree too
 (`head staged int8: 2.54 MB`; PSRAM free 3141 KB for C, 3211 KB for Rust —
 different allocators, same model).
+
+## Reproducibility and the layout tax
+
+**A given binary reproduces exactly on this board.** The C firmware was already
+known to (three runs, same total to 0.01 s, same per-stage figures to 0.1 ms);
+both Rust binaries in the table above were then re-run from a hard reset and
+did the same. One run per binary is therefore enough, and `--repeat`-style
+averaging buys nothing.
+
+The consequence is less comfortable, and it caught this project out once
+already. Because there is no run-to-run noise to absorb it, **a difference
+between two binaries in a stage neither of them touches is real.** `head` has
+now moved twice that way:
+
+| head | binary | what changed |
+|---|---|---|
+| 90.3 | pre-`c7f2ce7` | — |
+| 94.6 | `feat/ple-v2-header` | PLE\0 header parse, `out_vocab`; `head.rs` untouched |
+| 98.0 | `perf/nibble-lut` | two lookup tables, four reshaped loops; `head.rs` untouched |
+
+Neither commit changes a line the head executes. What they change is how much
+code and `.rodata` `llm-core` occupies, and the head streams 2.43 MB through a
+64 KB cache every token — a stage where instruction and data placement is
+worth several percent. Budget for it: an `llm-core` change that leaves the head
+alone can still cost the head 3–4 ms, and a change measured only on the stages
+it targets will overstate its net.
+
+The first reading of the 90.3 → 94.6 → 98.0 sequence here was thermal drift
+across back-to-back runs. It was not; the repeat runs killed that. Recorded
+because "the board was warming up" is the comfortable explanation and it was
+the wrong one.
 
 ## Reproducing
 
