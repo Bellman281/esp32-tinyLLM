@@ -44,7 +44,7 @@ fn main() {
     let mut s = owned.as_scratch();
 
     let seq = model.cfg.seq_len;
-    let vocab = model.cfg.vocab;
+    let vocab = model.cfg.out_vocab;
     let mut nll = 0f64;
     let mut count = 0u64;
 

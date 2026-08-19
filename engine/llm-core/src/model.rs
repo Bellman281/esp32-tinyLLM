@@ -17,7 +17,10 @@ use crate::ops;
 use crate::profile::Profile;
 use crate::rope;
 use crate::scratch::Scratch;
-use crate::tensor::{Cfg, Cursor, FVec, LoadError, QT, MAGIC_CHECK};
+use crate::tensor::{
+    Cfg, Cursor, FVec, LoadError, QT, FLAG_TIED_HEAD_CHECK, MAGIC_CHECK, MAGIC_V2_CHECK,
+    MAX_FORMAT_VERSION_CHECK,
+};
 
 /// Matches the C code's fixed per-layer array capacity (`Model.attn_norm[32]`
 /// etc). `Model::load` rejects anything larger instead of silently
@@ -81,18 +84,73 @@ impl<'a> Model<'a> {
     pub fn load(base: &'a [u8]) -> Result<Self, LoadError> {
         let mut c = Cursor::new(base);
         let magic = c.u32()?;
-        if magic != MAGIC_CHECK {
-            return Err(LoadError::BadMagic);
-        }
-        let vocab = c.i32()? as usize;
-        let dim = c.i32()? as usize;
-        let n_layers = c.i32()? as usize;
-        let n_heads = c.i32()? as usize;
-        let ffn = c.i32()? as usize;
-        let ple_dim = c.i32()? as usize;
-        let seq_len = c.i32()? as usize;
-        let group = c.i32()? as usize;
-        let rope_theta = c.f32()?;
+
+        // Two header formats carry the identical tensor stream; only the
+        // preamble differs.
+        //
+        //   "PLE1"  magic, then 8 int32 config fields, then rope_theta.
+        //           No version, no flags, no output_vocab. This is what the
+        //           model in model/ and the frozen C reference both use.
+        //
+        //   "PLE\0" magic, version, header_bytes, flags, input_vocab,
+        //           output_vocab, then the same 7 remaining config fields
+        //           and rope_theta. What the exporter writes today.
+        //
+        // header_bytes exists so a later version can append fields without
+        // breaking this reader: seek past it rather than assuming a size.
+        let (vocab, out_vocab, dim, n_layers, n_heads, ffn, ple_dim, seq_len, group, rope_theta) =
+            if magic == MAGIC_CHECK {
+                let vocab = c.i32()? as usize;
+                let dim = c.i32()? as usize;
+                let n_layers = c.i32()? as usize;
+                let n_heads = c.i32()? as usize;
+                let ffn = c.i32()? as usize;
+                let ple_dim = c.i32()? as usize;
+                let seq_len = c.i32()? as usize;
+                let group = c.i32()? as usize;
+                let rope_theta = c.f32()?;
+                // No output_vocab in this format: score every embedding row,
+                // exactly as the C reference does. Narrowing the head here
+                // would silently change greedy decode against a file whose
+                // author never declared the distinction.
+                (
+                    vocab, vocab, dim, n_layers, n_heads, ffn, ple_dim, seq_len, group, rope_theta,
+                )
+            } else if magic == MAGIC_V2_CHECK {
+                let version = c.u32()?;
+                if version > MAX_FORMAT_VERSION_CHECK {
+                    return Err(LoadError::UnsupportedVersion(version));
+                }
+                let header_bytes = c.u32()? as usize;
+                let flags = c.u32()?;
+                if flags & FLAG_TIED_HEAD_CHECK == 0 {
+                    return Err(LoadError::UntiedHead);
+                }
+                let vocab = c.u32()? as usize;
+                let out_vocab = c.u32()? as usize;
+                let dim = c.i32()? as usize;
+                let n_layers = c.i32()? as usize;
+                let n_heads = c.i32()? as usize;
+                let ffn = c.i32()? as usize;
+                let ple_dim = c.i32()? as usize;
+                let seq_len = c.i32()? as usize;
+                let group = c.i32()? as usize;
+                let rope_theta = c.f32()?;
+                if out_vocab == 0 || out_vocab > vocab {
+                    return Err(LoadError::BadOutputVocab);
+                }
+                // Skip anything a future version appended.
+                if header_bytes < c.pos() {
+                    return Err(LoadError::TooShort);
+                }
+                c = Cursor::at(base, header_bytes);
+                (
+                    vocab, out_vocab, dim, n_layers, n_heads, ffn, ple_dim, seq_len, group,
+                    rope_theta,
+                )
+            } else {
+                return Err(LoadError::BadMagic);
+            };
 
         if n_layers > MAX_LAYERS {
             return Err(LoadError::TooManyLayers);
@@ -100,6 +158,7 @@ impl<'a> Model<'a> {
 
         let cfg = Cfg {
             vocab,
+            out_vocab,
             dim,
             n_layers,
             n_heads,
@@ -188,6 +247,22 @@ fn try_bind_layer(
     c.bind_q(d, p)?; // ple_proj
     c.bind_f(d)?; // ple_norm
     Ok(c.pos())
+}
+
+/// `matvec` restricted to rows `0..row_end`, honouring the same
+/// int8/fp32 feature split. Used only for the output head, where
+/// `row_end` is `cfg.out_vocab` -- see `Model::load`.
+#[inline]
+fn matvec_rows(t: &QT, x: &[f32], y: &mut [f32], iq: &mut [i8], row_end: usize) {
+    #[cfg(feature = "int8-activations")]
+    {
+        t.matvec_int8_activations_range(x, y, iq, 0, row_end);
+    }
+    #[cfg(not(feature = "int8-activations"))]
+    {
+        let _ = iq;
+        t.matvec_range(x, y, 0, row_end);
+    }
 }
 
 #[inline]
@@ -474,7 +549,17 @@ fn llm_forward_impl(
     ops::rmsnorm_inplace(s.x, model.out_norm, d);
     match head.as_deref_mut() {
         Some(f) => f(s.x, s.logits),
-        None => dispatch_matvec(&mut matvec_override, &model.tok_emb, s.x, s.logits, s.iq),
+        // `s.logits` is sized `out_vocab`, which is `vocab` for every PLE1
+        // file. Where a PLE\0 file declares it smaller, the rows above it
+        // are padding the tokenizer can never emit, so scoring them is
+        // wasted work in the single most expensive stage. An override is
+        // handed the same slice and must respect its length.
+        None => match matvec_override.as_deref_mut() {
+            Some(f) => f(&model.tok_emb, s.x, s.logits),
+            // Explicitly row-bounded rather than `matvec`, which would run
+            // every embedding row and write past a shorter `logits`.
+            None => matvec_rows(&model.tok_emb, s.x, s.logits, s.iq, model.cfg.out_vocab),
+        },
     }
 
     if let Some((now, p)) = prof.as_mut() {
