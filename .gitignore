@@ -1,8 +1,19 @@
 # Rust build artifacts
 target/
 
+# demo/ artifacts: run_cli.sh compiles gen_prompt from reference-c/ on every
+# run, and the REPLs byte-compile the tokenizer module. Both are rebuilt on
+# demand -- neither is source.
+demo/gen_prompt
+__pycache__/
+
 # macOS Finder metadata
 .DS_Store
+
+# Editor/IDE state. The ESP-IDF VS Code extension writes machine-specific
+# absolute toolchain paths into .vscode/, so none of it is portable.
+.vscode/
+.idea/
 
 # Local scratch / cleanup staging (not part of the tracked project)
 engine/_to_delete/

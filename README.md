@@ -90,6 +90,9 @@ cc -O3 -o /tmp/gen_prompt reference-c/esp32-llm-lab/gen_prompt.c -lm
                 "$(scripts/model.sh n_generate)" \
                 "$(scripts/model.sh prompt_ids)" 0
 
+# host, no hardware: time the two engines against each other
+scripts/bench_host.py
+
 # on hardware
 cd engine/llm-firmware && cargo run --release
 ```
@@ -180,7 +183,8 @@ esp32-tinyLLM/
   model/                    <- trained model, dataset docs, and models.toml
                                (the registry both C and Rust read)
   scripts/                  <- model.sh, the C side's registry reader
-  demo/                     <- interactive CLI demo (Python REPL over the C engine)
+  demo/                     <- interactive CLI demo (Python REPL over either
+                               engine — chat.py drives C, chat_rust.py Rust)
   reference-c/             <- the C/C++ engine this port is checked against
                                (build-fix edits only — see its own README)
   data/                     <- validation tokens for the ppl parity test

@@ -117,6 +117,97 @@ To re-run without reflashing (the sketch runs once at boot, then idles):
 arduino-cli monitor -p "$PORT" --config baudrate=115200
 ```
 
+## Host-side comparison (no hardware)
+
+The numbers above are the ones that matter and they need a board. For a
+30-second check on a laptop — after a `llm-core` change, before reaching for
+the ESP32 — `scripts/bench_host.py` times the same two engines the demo
+REPLs drive (`chat.py` → C `gen_prompt`, `chat_rust.py` → Rust `gen-prompt`):
+
+```bash
+cd engine/llm-host && cargo build --release    # once
+scripts/bench_host.py                          # from the repo root
+```
+
+It takes prompt and token count from `model/models.toml`, runs greedy only,
+and **gates on parity before printing any timing** — if the two engines stop
+agreeing byte-for-byte it reports that and refuses to report speed. Per-token
+cost comes from the slope between a 50-token and a 400-token run, which
+cancels the fixed ~15 MB model load; each point is best-of-K wall clock.
+
+Measured on an x86-64 Linux host, `cc -O3` vs. `cargo build --release`,
+best of 9, reproduced across three runs (1.48x / 1.47x / 1.47x):
+
+| host, ms/token | per token | tok/s | ratio |
+|---|---|---|---|
+| **C reference** | 1.15 | 867 | |
+| **Rust** | 1.70 | 589 | **1.47x** |
+
+### By hand
+
+The script is only a wrapper — nothing stops you driving the two binaries
+directly, and it's worth doing once to see there's no magic in it. Build
+both engines, pull the settings from the registry so the two runs match,
+then time each:
+
+```bash
+cd engine/llm-host && cargo build --release && cd ../..
+cc -O3 -I reference-c/esp32-llm-lab -o /tmp/gen_prompt \
+   reference-c/esp32-llm-lab/gen_prompt.c -lm
+
+MODEL=$(scripts/model.sh bin);  VOCAB=$(scripts/model.sh vocab)
+IDS=$(scripts/model.sh prompt_ids);  N=$(scripts/model.sh n_generate)
+
+time /tmp/gen_prompt "$MODEL" "$N" "$IDS" 0 > /tmp/c.txt
+time ./engine/target/release/gen-prompt "$MODEL" "$VOCAB" "$N" "$IDS" 0 > /tmp/rust.txt
+
+cmp /tmp/c.txt /tmp/rust.txt && echo "parity: identical"
+```
+
+Mind the argv difference — C takes no `vocab.h` (it's `#include`d at compile
+time), Rust loads it at runtime. Run the `cmp` before believing the timings,
+for the reason given above. A representative result:
+
+```
+--- C ---     real 0m0.495s
+--- Rust ---  real 0m0.753s
+parity: identical
+```
+
+That raw wall clock is 1.52x, slightly above the script's 1.47x, because it
+still contains the ~30–40 ms of startup and model load that the script's
+two-point subtraction removes. To do that subtraction by hand, time a short
+run too and take the slope:
+
+```bash
+time /tmp/gen_prompt "$MODEL" 50 "$IDS" 0 > /dev/null   # then: (t400 - t50) / 350
+```
+
+Take the *minimum* of several runs at each point rather than one sample or a
+mean — on a laptop the floor is the signal and everything above it is other
+processes.
+
+Two caveats on reading this table:
+
+- **These are not device numbers and must not enter the README's table** —
+  CONTRIBUTING.md's rule that a host-only timing claim doesn't belong there.
+  An x86-64 core has caches and memory bandwidth an LX7 does not, and the
+  device gap is dominated by the PSRAM-bound output head, which has no host
+  analogue.
+- **The per-token figure is a mean over tokens 50–400**, not the
+  instantaneous cost at token 400 that the device table reports — `attn`
+  grows across that range. Both engines are measured identically, so the
+  *ratio* is sound; the absolute ms/token is not comparable to the table
+  above.
+
+That the host ratio (1.47x) lands so close to the device's (1.50x) is
+**not yet explained and should not be assumed causal.** On the device, the
+head is 56% of the absolute gap and is bandwidth-bound; on the host it
+cannot be. The agreement may mean the shared fp32 matvec dominates both for
+the same reason, or it may be coincidence. Nothing here has isolated it
+per-stage — `bench_host.py` times whole runs, not stages. Worth resolving
+before anyone treats the host as a proxy for the board.
+
 ## Why matched settings matter
 
 The C sketch ships with `N_GENERATE = 200` and a 4-token prompt; the Rust
