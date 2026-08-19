@@ -16,3 +16,13 @@ esp32-rust/
 
 # ESP-IDF build tooling, if generated locally
 .embuild/
+
+# training/ (vendored Python pipeline): downloaded corpus, checkpoints, and
+# exported artifacts. Generated, large, and reproducible -- none of it is source.
+training/data/
+training/runs/
+training/artifacts/
+training/generated/
+training/.venv/
+*.pyc
+*.egg-info/
