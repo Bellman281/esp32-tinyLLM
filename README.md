@@ -63,19 +63,19 @@ Two real bugs were caught that way during the port: an out-of-bounds scratch
 buffer for one model config, and a rounding-mode mismatch against C's `lrintf`.
 Both fixed.
 
-## Documentation
+## Docs
 
 | | |
 |---|---|
 | [BENCHMARKING.md](./BENCHMARKING.md) | how the numbers were measured, and what to optimize next |
 | [ROADMAP.md](./ROADMAP.md) | what to do next, in order, and what's still unexplained |
-| [MIGRATION_PLAN.md](./MIGRATION_PLAN.md) | why the port is scoped and sequenced this way |
 | [TRAINING.md](./TRAINING.md) | how `model.bin` was made — dataset → training → 4-bit PTQ → export |
-| [model/README.md](./model/README.md) | the model, its provenance, and how to add another |
-| [CONTRIBUTING.md](./CONTRIBUTING.md) | ground rules and how to run the parity tests |
+| [CONTRIBUTING.md](./CONTRIBUTING.md) | ground rules, and how to run the parity tests |
 
-New here? Read `MIGRATION_PLAN.md`, then `engine/llm-core/src/tensor.rs` and
-`model.rs` for the actual ported math, then `engine/llm-host/tests/`.
+Reading the code: [`MIGRATION_PLAN.md`](./MIGRATION_PLAN.md) for why the port is
+shaped this way, then `engine/llm-core/src/tensor.rs` and `model.rs` for the
+ported math, then `engine/llm-host/tests/`. The model itself, its provenance and
+how to add another: [`model/README.md`](./model/README.md).
 
 ## Repo layout
 
@@ -101,18 +101,15 @@ cannot drift apart.
 
 The main open work is closing the Rust-vs-C gap. [`ROADMAP.md`](./ROADMAP.md)
 sequences it — two cheap unknowns gate most of the expensive work, so start there
-rather than with the SIMD items. Ground rules in
-[CONTRIBUTING.md](./CONTRIBUTING.md).
+rather than with the SIMD items.
 
-## References
-
-- [slvDev/esp32-ai](https://github.com/slvDev/esp32-ai) — the upstream C engine and Python pipeline this ports from
-- [llama2.c](https://github.com/karpathy/llama2.c) — the single-file C inference style `llm.h` follows
-- TinyStories — Eldan & Li (2023), [arXiv:2305.07759](https://arxiv.org/abs/2305.07759)
-- Per-Layer Embeddings — Google's Gemma 3n on-device architecture
+Also built on: [llama2.c](https://github.com/karpathy/llama2.c) (the single-file C
+inference style `llm.h` follows), TinyStories (Eldan & Li 2023,
+[arXiv:2305.07759](https://arxiv.org/abs/2305.07759)), and Google's Gemma 3n
+Per-Layer Embeddings.
 
 ## License
 
 Apache 2.0 for this repo's code ([LICENSE](./LICENSE)). `reference-c/` is vendored
-from [slvDev/esp32-ai](https://github.com/slvDev/esp32-ai) and keeps its original
-MIT terms ([`reference-c/LICENSE`](./reference-c/LICENSE)).
+from upstream and keeps its original MIT terms
+([`reference-c/LICENSE`](./reference-c/LICENSE)).
