@@ -106,3 +106,50 @@ fn the_same_row_twice_gives_the_same_answer_twice() {
         assert_eq!(q, single, "row {r}: lane set B");
     }
 }
+
+/// The four-row variant, same contract.
+///
+/// Whether it is *faster* is a register-pressure question the LX7 answers —
+/// four lane sets is sixteen live accumulators on a machine with sixteen
+/// visible address registers, and a spill would cost more loads than the
+/// shared activation saves. This only fixes what it must compute.
+#[test]
+fn four_rows_at_once_match_four_rows_one_at_a_time() {
+    let bytes = std::fs::read(manifest::default_model().bin_path()).expect("model.bin");
+    let model = Model::load(&bytes).expect("load");
+    let head = model.tok_emb();
+    let cols = head.cols;
+    let x: Vec<f32> = (0..cols).map(|j| (j as f32 * 0.29).sin()).collect();
+    let mut a = vec![0i16; cols];
+    quantize_activations_i16(&x, &mut a);
+    let asum = llm_core::activation_sum_i16(&a);
+
+    let mut r = 0usize;
+    while r + 3 < head.rows {
+        let c: [&[u8]; 4] = [
+            head.packed_row(r).0,
+            head.packed_row(r + 1).0,
+            head.packed_row(r + 2).0,
+            head.packed_row(r + 3).0,
+        ];
+        let got = llm_core::dot4_int4_int16(c, &a, asum);
+        for k in 0..4 {
+            assert_eq!(
+                got[k],
+                dot_int4_int16(c[k], &a, asum),
+                "rows {r}..{}: element {k}",
+                r + 4
+            );
+        }
+        r += 4;
+    }
+    // All four slots fed the same row: the cheapest check that the lane sets
+    // are independent rather than aliasing.
+    let (c0, _) = head.packed_row(3);
+    let same = llm_core::dot4_int4_int16([c0, c0, c0, c0], &a, asum);
+    let single = dot_int4_int16(c0, &a, asum);
+    assert!(
+        same.iter().all(|&v| v == single),
+        "lane sets alias each other"
+    );
+}

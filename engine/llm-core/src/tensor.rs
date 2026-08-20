@@ -668,6 +668,75 @@ pub fn dot_int4_int16(row_codes: &[u8], actq: &[i16], act_sum: i32) -> i32 {
     acc - 8 * act_sum
 }
 
+/// Four rows at once, against one activation vector.
+///
+/// The same idea as `dot2_int4_int16` taken one step further: each activation
+/// is loaded once and multiplied into four rows instead of two, so activation
+/// loads fall from 0.5 per multiply-accumulate to 0.25. The head's loop is
+/// issue-bound (8.13 cycles/MAC cache-resident against 9.01 streaming), so
+/// instructions are the currency.
+///
+/// ```text
+/// per 8 MACs      one row     two rows    four rows
+///   weight loads      4           4           4
+///   nibble extracts   8           8           8
+///   activation loads  8           4           2
+///   mull + add       16          16          16
+/// ```
+///
+/// WHY THIS MIGHT NOT PAY, and why it is worth trying anyway: four rows need
+/// four lane sets, and at `DOT_LANES = 4` that is sixteen live accumulators on
+/// a machine with sixteen visible address registers. If the register allocator
+/// spills, the loads it adds will cost more than the loads this removes. That
+/// is exactly the sort of thing `scripts/disasm_head.sh` answers in one look,
+/// and the stopwatch confirms — it is cheap to try and cheap to abandon.
+///
+/// BIT-EXACT, for the same reason `dot2_int4_int16` is: the four rows share
+/// loads and nothing else. Same terms, same order, same lanes, same hoisted
+/// bias. `llm-host/tests/dot2_equivalence.rs` covers both.
+#[inline]
+pub fn dot4_int4_int16(rows: [&[u8]; 4], actq: &[i16], act_sum: i32) -> [i32; 4] {
+    let cols = actq.len();
+    let pairs = cols / 2;
+    let blocks = pairs / DOT_LANES;
+    let mut lanes = [[0i32; DOT_LANES]; 4];
+    let acts = &actq[..blocks * DOT_LANES * 2];
+    for (bi, aq) in acts.chunks_exact(DOT_LANES * 2).enumerate() {
+        let base = bi * DOT_LANES;
+        for l in 0..DOT_LANES {
+            let a0 = aq[2 * l] as i32;
+            let a1 = aq[2 * l + 1] as i32;
+            for (k, lane) in lanes.iter_mut().enumerate() {
+                let w = rows[k][base + l];
+                lane[l] += (w & 0xF) as i32 * a0;
+                lane[l] += (w >> 4) as i32 * a1;
+            }
+        }
+    }
+    let mut out = [0i32; 4];
+    for (k, lane) in lanes.iter_mut().enumerate() {
+        let mut half = DOT_LANES;
+        while half > 1 {
+            half /= 2;
+            for l in 0..half {
+                lane[l] += lane[l + half];
+            }
+        }
+        let mut acc = lane[0];
+        let done = blocks * DOT_LANES;
+        for p in done..pairs {
+            let w = rows[k][p];
+            acc += (w & 0xF) as i32 * actq[2 * p] as i32;
+            acc += (w >> 4) as i32 * actq[2 * p + 1] as i32;
+        }
+        if cols % 2 == 1 {
+            acc += (rows[k][pairs] & 0xF) as i32 * actq[cols - 1] as i32;
+        }
+        out[k] = acc - 8 * act_sum;
+    }
+    out
+}
+
 /// Two rows at once, against one activation vector.
 ///
 /// WHY. The head's inner loop was measured **issue-bound** on the ESP32-S3:
