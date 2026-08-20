@@ -75,7 +75,7 @@ at them.
 | `model.bin` | The trained, quantized model weights. Group-128 ragged int4 weights + fp16 group scales, tied input/output embedding. Config `V=32768 D=96 L=6 H=4 F=66 P=128 seq_len=512 group=128`, parsed directly from the file header. 14.91 MB. |
 | `vocab.h` | The tokenizer's token-id → UTF-8 bytes table, **25,353** entries (`VOCAB_N`). Generated data, not logic. Note this is *not* the 32,768 in `model.bin`'s header — see "Two different vocab numbers" below. |
 | `val.bin` | A stream of validation tokens (vocab size 32,768) used to compute cross-entropy/perplexity in the `ppl` parity tests (`engine/llm-host/tests/ppl_parity.rs`), which load this exact model. |
-| `models.toml` (in `model/`, not the model folder) | **The model registry** — the single place naming which model files exist, where they live, and what each is expected to produce. Read by Rust (`llm_host::manifest`) and by the C-side tooling (`scripts/model.sh`), so both get their paths, prompt ids, window counts, and expected cross-entropy from one source. See the top-level README's "The model registry". |
+| `models.toml` (in `model/`, not the model folder) | **The model registry** — the single place naming which model files exist, where they live, and what each is expected to produce. Read by Rust (`llm_host::manifest`) and by the C-side tooling (`scripts/model.sh`), so both get their paths, prompt ids, window counts, and expected cross-entropy from one source. See "Where it's used from" below. |
 
 SHA-256 of the `model.bin` in this folder:
 
@@ -94,8 +94,9 @@ Those two don't match each other. Likely explanations, not confirmed:
 `firmware/model/model.bin` is stale (from an earlier/smaller test config)
 and was never refreshed after the real 28.9M-param model was adopted, or the
 flash command's path is wrong. Worth resolving upstream in `reference-c/`
-(refreshed from `slvDev/esp32-ai`, not hand-edited, per `MIGRATION_PLAN.md`'s
-own rule) — not something guessed at here.
+(refreshed from `slvDev/esp32-ai`, not hand-edited, per
+the port's own
+rule) — not something guessed at here.
 
 One consequence: **this repo has no PyTorch golden-logit reference
 (`golden.txt`/`golden.npz`) for the model in this folder.** The only
@@ -125,48 +126,47 @@ model is still built with `vocab_size=32768`, leaving rows 25353–32767 padded
 and untrained. The likely cause is the BPE trainer exhausting useful merge
 candidates before reaching the target — TinyStories' effective vocabulary is
 small — but that is inferred from the artifacts, not measured; re-running
-`prepare.py` would confirm it. They are never scored on-device because no id above 25,352 can be
-emitted — but the output head does compute all 32,768 logits, so roughly 23% of
-the head's work is spent on rows that can never win. The head is already the
-largest single term in the C-vs-Rust gap (see
-[`BENCHMARKING.md`](../BENCHMARKING.md)), which makes this worth knowing.
+`prepare.py` would confirm it.
 
-Upstream's current export format carries `output_vocab` separately from
-`input_vocab` precisely so a runtime can skip that work, and `llm-core` now
-reads it — but this file is in the older format, which cannot express the
-distinction, so all 32,768 rows are still scored for *this* model. See
-[`TRAINING.md`](../TRAINING.md)'s "The two header formats".
+Those padded rows are not scored on-device. `llm-firmware` caps the staged head
+to `vocab.h`'s `VOCAB_N` *before* staging (`head::stage_and_spawn` is handed
+`vocab::vocab_n()`), so the output head computes **25,353** rows per token, not
+32,768 — the padded rows are neither staged into PSRAM nor multiplied. The C
+firmware makes the same distinction with its own `VOCAB_N` vs `Cfg.vocab`, so
+this is parity with the reference rather than an optimization over it. It does
+mean the head costs ~23% less than the header's `V` would suggest: 49.7
+ms/token on the shipping build, against the C reference's 57.1 (see
+[`BENCHMARKING.md`](../BENCHMARKING.md) for the current per-stage table).
+
+The host path is the exception. On a `PLE1` file — which is what this
+`model.bin` is — `llm-core` scores every embedding row, because that older
+header cannot express the distinction and the C host tools score all of them
+too; narrowing it there would silently change greedy decode and break parity.
+Upstream's newer format carries `output_vocab` separately from `input_vocab`
+precisely so a runtime can skip the work, and `llm-core` honours it wherever it
+is declared. See [`TRAINING.md`](../TRAINING.md)'s "The two header formats".
 
 ## Architecture
 
-A 28.9M-parameter decoder-only transformer, config `V=32768 D=96 L=6 H=4
-F=66 P=128` (vocab / hidden dim / layers / heads / FFN dim / per-layer-embed
-dim), split-half RoPE, causal self-attention with a persistent KV cache,
-SwiGLU FFN, RMSNorm, and a tied input/output embedding — the full math is
-implemented once in `reference-c/firmware/common/llm.h` and ported
-function-for-function to `engine/llm-core`.
+**Maintained in [`TRAINING.md`](../TRAINING.md)**, under "What the shipped
+model actually is" — architecture, the 28.9M/25M parameter split across the
+Gemma-style Per-Layer Embedding table, config, context window, quantization
+scheme, corpus and provenance, all read straight out of this file's header
+rather than quoted. That table used to be paraphrased here as well, and the
+two copies drifted; one of them is now a link.
 
-The distinguishing piece is **Gemma-style Per-Layer Embeddings (PLE)**: of
-the 28.9M total parameters, roughly 25M (`V * P * L` = 32768 * 128 * 6) live
-in a flash-mapped per-layer lookup table rather than a single shared
-embedding, and are gated into each layer as `x +=
-RMSNorm(ple_proj(gelu(ple_gate(x)) * ple_l))`. This is the same technique
-Google introduced in **Gemma 3n** to keep most of a model's parameters out
-of the memory that has to hold "hot" transformer weights — here it's
-flash/PSRAM standing in for the accelerator-memory constraint the technique
-was designed around, which is what makes a 28.9M-parameter model fit and
-run on a 512KB-SRAM / 8MB-PSRAM chip at all. See:
+The one-line version, because the registry entry is meaningless without it: a
+28.9M-parameter decoder-only transformer, `V=32768 D=96 L=6 H=4 F=66 P=128
+seq_len=512 group=128`, int4 group-wise weights with fp16 group scales and a
+tied input/output embedding. The math is implemented once in
+`reference-c/firmware/common/llm.h` and ported function-for-function to
+`engine/llm-core`.
 
-- Gemma 3n developer guide (Google): <https://developers.googleblog.com/en/introducing-gemma-3n-developer-guide/>
-- Gemma model documentation: <https://ai.google.dev/gemma/docs>
-
-Weights are int4, group-wise quantized (group size 128) with fp16 group
-scales; the output head can additionally run in int8-staged mode for the
-dual-core split described in the top-level README's status table.
-
-Note: the sequence length in the header (`seq_len=512`) is this model's
-context window — 512 tokens, not 32K. The "32K" in this model is its
-**vocabulary** size (32,768 tokens), not its context length.
+How that gets *run* is a different file again: the on-device head is staged as
+packed **int4** (1.32 MB) with `i16` activations and two rows computed per
+pass, split across both LX7 cores. See
+[`engine/llm-firmware/README.md`](../engine/llm-firmware/README.md) for the
+port map and [`BENCHMARKING.md`](../BENCHMARKING.md) for what it costs.
 
 ## Dataset
 
@@ -199,8 +199,10 @@ unmodified at [`training/`](../training/), with a walkthrough in
 The *artifacts* in this folder were produced by running that pipeline —
 trained 2 August 2026 on a rented VPS GPU by this repo's author, not
 downloaded from upstream's release. Regenerating them is a manual act
-performed outside any build here; see `TRAINING.md`, including the open
-export-format blocker that currently prevents a clean re-run.
+performed outside any build here; see [`TRAINING.md`](../TRAINING.md),
+including "The two header formats" — `llm-core` reads both, so the pipeline
+round-trips under Rust, but the frozen C tools only read `PLE1`, so a freshly
+exported model cannot be checked against them.
 
 A full from-scratch walkthrough of the C side (the pure-C host demo and the
 QEMU device emulator) is in `reference-c/esp32-llm-lab/README.md`.

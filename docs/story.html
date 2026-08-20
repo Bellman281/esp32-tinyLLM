@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Porting a C inference engine to Rust</title>
+<style>
+  @page { size: A4; margin: 17mm 16mm 18mm 16mm; }
+  @page :first { margin: 0; }
+
+  :root{
+    --ink:#14161a; --muted:#5b6068; --line:#e2e4e8;
+    --blue:#2a78d6; --orange:#eb6834; --green:#12a06f; --gold:#d99000;
+    --red:#d13b3b; --panel:#f6f7f9;
+  }
+
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; padding:0; }
+  body{
+    font-family: Georgia, "Times New Roman", serif;
+    font-size:10.2pt; line-height:1.52; color:var(--ink);
+    -webkit-print-color-adjust:exact; print-color-adjust:exact;
+  }
+  h1,h2,h3,h4,.sans{ font-family:"Helvetica Neue", Helvetica, Arial, sans-serif; }
+  code,pre,.mono{ font-family:"SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace; }
+
+  /* ---------- cover ---------- */
+  .cover{
+    height:297mm; padding:26mm 20mm 18mm 20mm; color:#fff;
+    background:
+      radial-gradient(900px 520px at 78% 8%, rgba(42,120,214,.42), transparent 62%),
+      radial-gradient(760px 520px at 8% 92%, rgba(235,104,52,.34), transparent 60%),
+      linear-gradient(158deg,#12161d 0%, #1a1f28 55%, #171c24 100%);
+    display:flex; flex-direction:column; break-after:page;
+  }
+  .kicker{ font-size:9pt; letter-spacing:.22em; text-transform:uppercase;
+           color:#8fb6e8; font-weight:700; }
+  .cover h1{ font-size:34pt; line-height:1.1; margin:14mm 0 0 0; font-weight:700;
+             letter-spacing:-.5px; max-width:150mm; }
+  .cover h1 em{ font-style:normal; color:#6fb0ff; }
+  .cover .sub{ font-size:13pt; color:#c7ccd6; margin-top:7mm; max-width:135mm;
+               line-height:1.5; }
+
+  .bignums{ display:flex; gap:9mm; margin-top:auto; margin-bottom:9mm; }
+  .bn{ background:rgba(255,255,255,.055); min-width:0; border:1px solid rgba(255,255,255,.13);
+       border-radius:9px; padding:6mm 7mm; flex:1; }
+  .bn .v{ font-size:20pt; white-space:nowrap; font-weight:700; letter-spacing:-.5px; }
+  .bn .v.g{ color:#3ddba0; } .bn .v.b{ color:#6fb0ff; } .bn .v.o{ color:#ff9a6b; }
+  .bn .l{ font-size:8.4pt; color:#a9b0bd; margin-top:2mm; line-height:1.4;
+          font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; }
+  .cover .foot{ font-size:9pt; color:#8b93a1; border-top:1px solid rgba(255,255,255,.13);
+                padding-top:5mm; font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; }
+
+  /* ---------- flow ---------- */
+  h2{ font-size:16pt; margin:11mm 0 1mm 0; letter-spacing:-.3px;
+      break-after:avoid; }
+  h2 .num{ color:var(--blue); font-weight:700; margin-right:3mm; }
+  h2 + .rule{ height:3px; width:26mm; background:var(--blue); border-radius:2px;
+              margin-bottom:4mm; }
+  h3{ font-size:11.6pt; margin:7mm 0 2mm 0; color:#22262d; break-after:avoid; }
+  h4{ font-size:10pt; margin:5mm 0 1.5mm 0; color:var(--muted);
+      text-transform:uppercase; letter-spacing:.09em; break-after:avoid; }
+  p{ margin:0 0 3.2mm 0; }
+  .lead{ font-size:11.4pt; color:#2c313a; }
+  strong{ color:#000; }
+  a{ color:var(--blue); text-decoration:none; }
+
+  .newpage{ break-before:page; }
+
+  /* ---------- callouts ---------- */
+  .box{ border-left:4px solid var(--blue); background:var(--panel);
+        padding:4mm 5mm; margin:4.5mm 0; border-radius:0 6px 6px 0;
+        break-inside:avoid; }
+  .box .tag{ font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;
+             font-size:7.8pt; font-weight:700; letter-spacing:.14em;
+             text-transform:uppercase; color:var(--blue); margin-bottom:1.5mm; }
+  .box p:last-child{ margin-bottom:0; }
+  .box.wrong{ border-color:var(--orange); background:#fdf3ee; }
+  .box.wrong .tag{ color:var(--orange); }
+  .box.win{ border-color:var(--green); background:#eefaf4; }
+  .box.win .tag{ color:var(--green); }
+  .box.dead{ border-color:var(--red); background:#fdf0f0; }
+  .box.dead .tag{ color:var(--red); }
+  .box.rule2{ border-color:var(--gold); background:#fdf7e8; }
+  .box.rule2 .tag{ color:var(--gold); }
+
+  /* ---------- code ---------- */
+  pre{ background:#12161d; color:#e8eaee; padding:4mm 5mm; border-radius:6px;
+       font-size:8.3pt; line-height:1.45; overflow:hidden; margin:3.5mm 0;
+       break-inside:avoid; white-space:pre-wrap; }
+  pre .c{ color:#7f8794; } pre .hl{ color:#ff9a6b; font-weight:700; }
+  pre .ok{ color:#3ddba0; }
+  code{ background:#eef0f4; padding:.5mm 1.2mm; border-radius:3px; font-size:8.8pt; }
+
+  /* ---------- tables ---------- */
+  table{ width:100%; border-collapse:collapse; margin:4mm 0; font-size:9pt;
+         break-inside:avoid; font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; }
+  th{ text-align:left; font-size:8pt; text-transform:uppercase; letter-spacing:.08em;
+      color:var(--muted); border-bottom:2px solid var(--ink); padding:2mm 2.5mm; }
+  td{ padding:2mm 2.5mm; border-bottom:1px solid var(--line); vertical-align:top; }
+  tr:nth-child(even) td{ background:#fafbfc; }
+  td.num, th.num{ text-align:right; font-variant-numeric:tabular-nums; }
+  .win-cell{ color:var(--green); font-weight:700; }
+  .bad-cell{ color:var(--red); font-weight:700; }
+  table.tight td{ padding:1.6mm 2.5mm; }
+
+  .caption{ font-size:8.4pt; color:var(--muted); margin:-2mm 0 5mm 0;
+            font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; }
+
+  .chart{ background:#fff; border:1px solid var(--line); border-radius:8px;
+          padding:3mm; margin:4mm 0; break-inside:avoid; }
+  .chart svg{ width:100%; height:auto; display:block; }
+
+  .arrow{ color:var(--muted); }
+  .delta-good{ color:var(--green); font-weight:700; }
+  .delta-bad{ color:var(--red); font-weight:700; }
+
+  ul{ margin:0 0 3.2mm 0; padding-left:5mm; }
+  li{ margin-bottom:1.6mm; }
+
+  .final{ background:linear-gradient(140deg,#12161d,#1e2632); color:#fff;
+          border-radius:10px; padding:7mm 8mm; margin-top:6mm; break-inside:avoid; }
+  .final h3{ color:#fff; margin-top:0; }
+  .final p{ color:#ccd2dc; }
+  .final strong{ color:#fff; }
+</style>
+</head>
+<body>
+
+<!-- ============ COVER ============ -->
+<section class="cover">
+  <div class="kicker">esp32-tinyLLM &nbsp;·&nbsp; engineering report</div>
+  <h1>Porting a C inference engine to Rust — and making it <em>faster</em></h1>
+  <div class="sub">A 28.9M-parameter language model on an $8 microcontroller.
+  What we got wrong on the way, and how each wrong thing got caught.</div>
+
+  <div class="bignums">
+    <div class="bn"><div class="v b">122.0 ms</div>
+      <div class="l">C reference,<br>per token</div></div>
+    <div class="bn"><div class="v g">95.2 ms</div>
+      <div class="l">Rust port,<br>per token</div></div>
+    <div class="bn"><div class="v g">28.2%</div>
+      <div class="l">faster than C, on<br>all five stages</div></div>
+    <div class="bn"><div class="v o">10</div>
+      <div class="l">wrong turns, each<br>killed by a number</div></div>
+  </div>
+
+  <div class="foot">ESP32-S3 @ 240 MHz · 400 tokens, 18-token prompt · byte-identical output,
+  verified on device by token digest <span class="mono">0x327578cb136fd6aa</span></div>
+</section>
+
+<!-- ============ 1 ============ -->
+<h2><span class="num">01</span>The starting point</h2><div class="rule"></div>
+
+<p class="lead">A 28.9M-parameter language model runs on an ESP32-S3 — a dual-core
+microcontroller with 512 KB of SRAM, 8 MB of external PSRAM, and no vector unit worth the
+name. It fits because ~25M of its parameters live in a flash-mapped Per-Layer Embedding
+table and the rest are 4-bit quantized.</p>
+
+<p>The implementation was a single-file C engine in the <span class="mono">llama2.c</span>
+style. On this board it produced a token every <strong>122.0 ms</strong> — 8.20 tokens per
+second. We set out to port it to Rust: not to rewrite it, not to redesign it, but to port it
+function for function and then find out whether Rust could match C on a machine this small.</p>
+
+<p>A port like this has exactly one way to fail invisibly. If the Rust version computes
+something slightly different — a rounding mode, an accumulation order, a clamp — it will
+still emit plausible children's stories, and it will be faster or slower for reasons that
+have nothing to do with the code. So the first decision was not about performance.</p>
+
+<div class="box rule2">
+  <div class="tag">The rule everything else rests on</div>
+  <p><strong>Everything must be bit-exact, and a machine must check it.</strong> No
+  tolerance anywhere. Not "close enough", not "within epsilon."</p>
+</div>
+
+<p>That rule turned out to be the most valuable thing in the project — and not for the
+reason we expected.</p>
+
+<h3>Three ground rules</h3>
+
+<table class="tight">
+<tr><td style="width:32mm"><strong>No tolerance</strong></td>
+<td>Golden logits against PyTorch, byte-identical CLI output against the compiled C binary,
+exact fp32 cross-entropy over real validation tokens. Where a change <em>could</em> alter a
+value, a test asserts it does not — bit for bit, on every row of the shipped model.</td></tr>
+<tr><td><strong>Measure, don't reason</strong></td>
+<td>Every performance claim gets a number from the actual board. A hypothesis with no
+measurement behind it is a guess — and this report is largely a record of how often our
+guesses were wrong.</td></tr>
+<tr><td><strong>Keep the failures</strong></td>
+<td>A change that made things worse is recorded with its number, not quietly deleted. Three
+are in the published benchmark table today.</td></tr>
+</table>
+
+<!-- ============ 2 ============ -->
+<h2><span class="num">02</span>The naive port was 2.5× slower</h2><div class="rule"></div>
+
+<p>The first working Rust firmware ran at <strong>311.5 ms/token</strong>. Against C's 122.0,
+that is 2.55× slower — same algorithm, same model file, same board. This is the moment where
+a port either learns something or starts guessing.</p>
+
+<table>
+<tr><th>ms / token</th><th class="num">input</th><th class="num">attn</th><th class="num">ffn</th>
+<th class="num">ple</th><th class="num">head</th><th class="num">wall</th></tr>
+<tr><td><strong>C reference</strong></td><td class="num">4.4</td><td class="num">42.9</td>
+<td class="num">6.9</td><td class="num">8.5</td><td class="num">57.1</td>
+<td class="num"><strong>122.0</strong></td></tr>
+<tr><td><strong>Rust, first run</strong></td><td class="num">10.6</td><td class="num">66.7</td>
+<td class="num">15.8</td><td class="num">20.4</td><td class="num bad-cell">193.8</td>
+<td class="num"><strong>311.5</strong></td></tr>
+</table>
+<div class="caption">The output head — a [25353 × 96] matrix-vector product run in full for
+every token — was 3.4× slower than C's and 62% of the whole budget.</div>
+
+<h3>Three bugs wearing optimization costumes</h3>
+
+<p>Before any real optimization, three things were simply wrong.</p>
+
+<div class="box wrong">
+  <div class="tag">Bug 1 — the dual-core split was not dual-core</div>
+  <p>The C reference creates a worker pinned to core 0 with
+  <span class="mono">xTaskCreatePinnedToCore(..., 0)</span>, and the port copied that
+  faithfully. But arduino-esp32 runs <span class="mono">loop()</span> on CPU1 while ESP-IDF
+  pins the main task to CPU0. Same call, different scheduler context: <strong>both halves of
+  the head were queueing on one core</strong>, with a task switch between them. One config
+  line fixed it.</p>
+</div>
+
+<p><strong>Bug 2</strong> was a doubled load — the model was being read twice on the path into
+PSRAM. <strong>Bug 3</strong> was cache configuration: the external-memory caches sat at their
+defaults, and widening them moved the head <strong>110.9 → 87.6 ms</strong>, a bigger single
+move than anything had produced on any stage.</p>
+
+<p>That last one felt like a discovery. It was the start of a wrong turn that cost several
+days.</p>
+
+<!-- ============ 3 ============ -->
+<h2 class="newpage"><span class="num">03</span>The head, in six episodes</h2><div class="rule"></div>
+
+<h3>Episode 1 — "It's bandwidth-bound", and the change that proved nothing</h3>
+
+<p>Widening the caches helped enormously, so the head must be starved of memory. It streams
+2.54 MB of int8 weights per token through a 64 KB data cache. The reasoning was clean.</p>
+
+<p>So we packed it. The model file already stores the head as 4-bit codes; the C reference
+unpacks them to int8 once at boot. Staging the <em>packed</em> form halves what the stage
+streams — <strong>2.54 MB → 1.32 MB</strong> — at the cost of a mask or shift per element,
+and hands back 1.2 MB of PSRAM.</p>
+
+<div class="box dead">
+  <div class="tag">Result</div>
+  <p>The head moved <strong>0.0 ms</strong>. Not "a little" — zero. And a null result like
+  that is consistent with two opposite worlds: memory doesn't matter, or memory matters and
+  something else is hiding it.</p>
+</div>
+
+<h3>Episode 2 — The instrument that settled it, in one boot</h3>
+
+<p>Rather than argue, we built a measurement. Two of them, in the same run:</p>
+
+<pre>PSRAM read: 72 MB/s  <span class="c">(1.22 MB of head weights =&gt; 16.9 ms/token floor)</span>
+head detail: own-half <span class="hl">90.9</span> | wait-worker 0.0 | worker-half <span class="hl">90.9</span></pre>
+
+<p>Both cores independently finished their half of the head in 90.9 ms. That is
+<strong>13.4 MB/s used against 72 available — 19% utilization</strong>. And the shape is the
+proof: if memory were the constraint, two cores reading at once could not <em>both</em> have
+hit 90.9. They would have contended.</p>
+
+<div class="box">
+  <div class="tag">Measurement</div>
+  <p>The head was compute-bound, and always had been. Packing bought a resource the stage was
+  not short of — which is exactly why it measured zero. The cache-widening win that started
+  this was real, but it was <em>instruction</em> cache; we had credited the wrong half of the
+  same config change.</p>
+</div>
+
+<h3>Episode 3 — The dependency chain, and a table making things slower</h3>
+
+<p>Compute-bound means instructions and stalls. The inner loop had a single accumulator:
+every multiply-accumulate waited on the one before it. Four independent accumulator chains
+took the head <strong>91.0 → 81.3 ms</strong>.</p>
+
+<p>Then a sharper one. Each 4-bit code is stored biased by 8, so every element paid a
+<span class="mono">−8</span>. But <span class="mono">Σ(cⱼ−8)aⱼ = Σcⱼaⱼ − 8Σaⱼ</span> — the
+bias lifts out of the loop entirely, once per row instead of once per element.
+<strong>81.3 → 61.5 ms.</strong></p>
+
+<div class="box wrong">
+  <div class="tag">A pattern copied without re-deriving it</div>
+  <p>That change also deleted a 16-entry lookup table we had added on purpose. It was copied
+  from the float path, where it replaces an integer→float <em>conversion</em> and is worth
+  −24% on the host. On the integer path it replaced a <em>subtract</em> — one cycle — with a
+  memory load.</p>
+</div>
+
+<h3>Episode 4 — Reading the disassembly, and deleting one instruction</h3>
+
+<p>The head was now 62.2 ms against C's 57.1 — the last stage still behind, and stage timing
+had nothing left to say. So we started dumping the Xtensa both compilers emit and reading it
+side by side. Twelve instructions for two multiply-accumulates, two of them doing nothing:</p>
+
+<pre>l8ui  a15, a3, 0      <span class="c">; load activation</span>
+<span class="hl">sext  a15, a15, 7     ; &lt;-- pure overhead</span>
+mull  a15, a15, a7</pre>
+
+<p><strong>The LX7 has no signed byte load.</strong> <span class="mono">l8ui</span>
+zero-extends, so every <span class="mono">i8</span> activation read cost a load
+<em>and</em> a sign-extend — 2.43 million times per token. Widening the activation scratch to
+<span class="mono">i16</span> lets <span class="mono">l16si</span> sign-extend inside the
+load and deletes the instruction. Cost: 96 extra bytes, read once per token.</p>
+
+<div class="box win">
+  <div class="tag">62.2 → 55.3 ms</div>
+  <p><strong>The head crossed C for the first time</strong> — 55.3 against 57.1, 0.97× — the
+  fifth and last stage to do so. One deleted instruction.</p>
+</div>
+
+<p>The same session killed two of our own claims. We had been saying the LX7's MAC16 unit was
+the next big lever, because the Rust binary held 814 <span class="mono">mull</span> and only
+19 <span class="mono">mula.*</span>. Then we disassembled GCC's output: <strong>zero</strong>
+<span class="mono">mula.*</span>. Neither compiler uses it. And we had claimed Rust was "38%
+behind C on arithmetic" — a figure that assumed C's memory time was additive, which would
+require C to hit 6.0 cycles/MAC on an eight-instruction serial chain. Nothing in-order does
+that: C's single accumulator stalls, and the stalls absorb its memory latency. Both retracted
+in writing, in the commit that fixed the instruction.</p>
+
+<h3 class="newpage">Episode 5 — Asking whether the loop stalls, then acting on the answer</h3>
+
+<p>One more measurement before the next change: time the identical loop with weights resident
+in cache, and again streaming from PSRAM.</p>
+
+<div class="box">
+  <div class="tag">8.96 vs 9.64 cycles per multiply-accumulate</div>
+  <p>Eight percent apart. If the loop were stalling on memory, prefetch and software
+  pipelining would be the levers. Eight percent apart means it is <strong>issue-bound</strong>
+  — the accumulator chains already cover load-use latency, and the only thing that helps is
+  executing fewer instructions.</p>
+</div>
+
+<p>Which pointed at something sitting in plain sight: the activation vector is the same 96
+values for all 25,353 rows, and the loop reloaded it for every one. Two rows per pass loads
+each activation once and multiplies it into both.</p>
+
+<div class="box win">
+  <div class="tag">55.3 → 49.7 ms · cycles/MAC 8.96 → 8.13 · 10.50 tok/s</div>
+  <p>Close to the 11% the instruction count predicted. <strong>Every stage now faster than
+  C.</strong></p>
+</div>
+
+<h3>Episode 6 — Two failures, kept on purpose</h3>
+
+<p><strong>Four rows per pass.</strong> If two rows halve the activation loads, four should
+quarter them. We wrote the failure mode into the commit message before flashing: four rows
+need four lane sets, and at four lanes each that is sixteen live accumulators on a machine
+with sixteen visible address registers.</p>
+
+<div class="box dead">
+  <div class="tag">It spilled — head 49.3 → 52.8 ms</div>
+  <p>Cycles/MAC went the wrong way, <strong>8.13 → 8.41</strong> — the spill showing up
+  directly in the one number that could name it. Reverted the same day. The arithmetic is
+  kept, tested, off the hot path, with the measurement in its doc comment.</p>
+</div>
+
+<p><strong>Staging the head as int8 again.</strong> The other direction: drop the unpack, use
+C's own format, one fewer operation per element. <strong>Head 62.3 → 76.9 ms. Token 106.3 →
+121.5.</strong> Doubling the bytes cost 14.6 ms against a predicted 13.3 for the extra
+1.21 MB — so the unpack arithmetic it removed was worth at most 1.3 ms across 2.43M elements.
+Nothing.</p>
+
+<div class="box rule2">
+  <div class="tag">Why this is the most useful failure in the project</div>
+  <p>It retroactively explains Episode 1. Packing measured 0.0 ms <em>because the
+  single-accumulator loop was stalling, and the stalls hid the memory traffic.</em> Breaking
+  the dependency chain exposed it. <strong>The same change is worth 13 ms today and was worth
+  0 then.</strong></p>
+  <p>It also falsified what we started believing after Episode 2 — "compute-bound, so bytes
+  don't matter." Low bandwidth utilization is not the same as insensitivity to bandwidth.
+  Both are true at once, and only measurement tells them apart.</p>
+</div>
+
+<!-- ============ 4 ============ -->
+<h2 class="newpage"><span class="num">04</span>Everything that wasn't the head</h2><div class="rule"></div>
+
+<p>While the head was 62 ms of a 138 ms token, the <em>other</em> 76 ms ran on one core with
+the second parked in <span class="mono">wait_notification</span>.</p>
+
+<table>
+<tr><th style="width:40mm">change</th><th>what it does</th><th class="num">effect</th></tr>
+<tr><td><strong>Dual-core every matvec</strong></td>
+<td>556k fp32 multiply-accumulates per token in <span class="mono">input</span>,
+<span class="mono">ffn</span> and <span class="mono">ple</span>, split by rows. Bit-exact:
+<span class="mono">y[r]</span> depends only on row <span class="mono">r</span>, so which core
+computes it cannot change it.</td>
+<td class="num win-cell">−12 ms</td></tr>
+<tr><td><strong>Split attention</strong></td>
+<td>The matvec hook could not reach attention, because attention is not a matvec.
+Instrumenting it four ways found <span class="mono">core</span> at 28.3 ms — 24% of the
+token, still single-threaded. Heads divide like rows: each reads the whole KV cache, writes
+only its own slice.</td>
+<td class="num win-cell">28.3 → 15.6</td></tr>
+<tr><td><strong>Argmax into the head</strong></td>
+<td>Outside the profiled stages sat 2.74 ms: 25,353 floats read back from PSRAM at half bus
+rate, because a data-dependent branch per element leaves nothing to pipeline. Both cores
+already hold each logit in a register.</td>
+<td class="num win-cell">2.74 → 0.00</td></tr>
+</table>
+
+<p>The attention split is also an honest loose end. A perfect halving plus measured sync
+would have been 14.25 ms, so 1.35 ms — 9.5% — did not come back, and we still cannot fully
+separate bus contention from code placement there. It is written down as unresolved rather
+than explained away.</p>
+
+<p>The argmax is the one place this port is <em>not</em> doing the same work as its reference.
+It is doing less of it, for the same output — the C engine still pays that 2.2 ms.</p>
+
+<!-- ============ 5 ============ -->
+<h2><span class="num">05</span>The scoreboard of wrong ideas</h2><div class="rule"></div>
+
+<table>
+<tr><th style="width:52mm">what we believed</th><th>what the measurement said</th></tr>
+<tr><td>Attention is the worst stage, 2.10×</td>
+<td>The two runs used different settings, and <span class="mono">attn</span> is the only
+stage that scales with sequence position. At matched settings it was 1.27× — the
+<em>closest</em> stage to parity.</td></tr>
+<tr><td>The head is bandwidth-bound</td>
+<td>19% of available bandwidth; both cores hit 90.9 ms independently.</td></tr>
+<tr><td>Compute-bound, so bytes don't matter</td>
+<td>Doubling the bytes cost 14.6 ms.</td></tr>
+<tr><td>MAC16 is the next lever</td>
+<td>GCC emits zero <span class="mono">mula.*</span> either.</td></tr>
+<tr><td>Rust is 38% behind C on arithmetic</td>
+<td>Assumed C's memory was additive. C's single accumulator stalls and hides it.</td></tr>
+<tr><td>120 MHz MSPI is worth ~7 ms</td>
+<td>3.4 ms. The head moved 0.3% while its memory floor dropped 13.4 → 9.3 ms.</td></tr>
+<tr><td>It looks like a flash-clock win</td>
+<td>Flash 40 → 80 MHz measured 106.6 ms — nothing at all.</td></tr>
+<tr><td>Four rows per pass will help</td>
+<td>Register spill; cycles/MAC 8.13 → 8.41. Predicted in advance, reverted same day.</td></tr>
+<tr><td>The board is warming up</td>
+<td>A given binary reproduces to 0.01 s. It is code placement.</td></tr>
+<tr><td>Host ratio ≈ device ratio, so the host is a proxy</td>
+<td>They came apart the moment anything changed — a coincidence mistaken for a method.</td></tr>
+</table>
+
+<p>Ten entries. Every one killed by a number, usually within a day, usually by an instrument
+built specifically to kill it.</p>
+
+<!-- ============ 6 ============ -->
+<h2 class="newpage"><span class="num">06</span>What made all of it possible</h2><div class="rule"></div>
+
+<h3>The board proves its own output</h3>
+
+<p>Every row of the benchmark table before a certain point claimed "byte-identical output" on
+the strength of a human reading 400 tokens of children's stories and thinking they looked the
+same. Now the firmware folds every token id it emits into a digest and prints it:</p>
+
+<pre>token digest: <span class="hl">0x327578cb136fd6aa</span> (418 tokens) <span class="ok">OK</span> -- matches models.toml gen_digest</pre>
+
+<p>The registry pins the value; a host test recomputes it through the same code path. Every
+experiment since — including both reverted ones — is certified <em>bit-exact and purely a
+cost</em>. Without it, "the int8 head is 14.6 ms slower" would carry an unspoken
+"…probably while computing the same thing."</p>
+
+<h3>Figures are generated, never typed</h3>
+
+<p>Every number in the README and the benchmark document comes out of one TOML file through
+one script — the table, both charts, the headline percentage, even the tok/s in the opening
+sentence. Before that, the chart was a hand-drawn PNG with no generator: it could not be
+regenerated, only redrawn, so it silently aged every time anyone reflashed.</p>
+
+<p>We know exactly how well hand-maintenance works, because the one figure the generator
+could not reach — the tok/s in the README's third paragraph — sat at "9.4" through four
+re-measurements.</p>
+
+<h3>The layout tax</h3>
+
+<p>Two commits that do not touch the head moved it 90.3 → 94.6 → 98.0 ms. The first read was
+thermal drift. Repeat runs from hard reset killed that: a given binary reproduces to 0.01 s
+of wall clock and 0.1 ms per stage. It is code and <span class="mono">.rodata</span>
+placement — the head streams 1.32 MB through a 64 KB cache, and where the loop lands relative
+to cache lines is worth several percent.</p>
+
+<div class="box wrong">
+  <div class="tag">The same probe, the same buffer, five binaries</div>
+  <p><strong>68 / 72 / 73 / 75 / 81 MB/s.</strong> The corollary is uncomfortable: with no
+  run-to-run noise, a difference between two binaries in a stage neither touched is
+  <em>real</em> — and is not attributable to the change. Every comparison here is made
+  between builds of the same kind, probe against probe, shipping against shipping.</p>
+</div>
+
+<p>Even the instrument taxes what it measures. The bandwidth probe runs once at boot, outside
+the timed loop, and still cost <strong>0.3 ms/token</strong> — purely from fifty lines sitting
+in the same file and moving everything else. It lives behind a feature flag now.</p>
+
+<!-- ============ 7 ============ -->
+<h2 class="newpage"><span class="num">07</span>Where it ended</h2><div class="rule"></div>
+
+<div class="chart">
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="494" viewBox="0 0 860 494" font-family="ui-sans-serif,-apple-system,Segoe UI,Roboto,sans-serif">
+<defs><pattern id="prov" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="none"/><line x1="0" y1="0" x2="0" y2="6" stroke="#fcfcfb" stroke-width="2" opacity="0.55"/></pattern></defs>
+<rect width="860" height="494" fill="#fcfcfb"/>
+<text x="74" y="34" font-size="17" font-weight="600" fill="#0b0b0b">Per-stage inference cost, C vs Rust</text>
+<text x="74" y="55" font-size="12" fill="#52514e">ESP32-S3 @ 240 MHz · 400 tokens, 18-token prompt · ms per token, lower is better</text>
+<rect x="74" y="66" width="10" height="10" rx="2" fill="#2a78d6"/>
+<text x="89" y="75" font-size="12" fill="#52514e">C reference</text>
+<rect x="194.2" y="66" width="10" height="10" rx="2" fill="#eb6834"/>
+<text x="209.2" y="75" font-size="12" fill="#52514e">Rust, now</text>
+<line x1="74.0" y1="86" x2="74.0" y2="432" stroke="#e4e3e0" stroke-width="1"/>
+<text x="74.0" y="450" font-size="11" fill="#52514e" text-anchor="middle">0</text>
+<line x1="180.0" y1="86" x2="180.0" y2="432" stroke="#e4e3e0" stroke-width="1"/>
+<text x="180.0" y="450" font-size="11" fill="#52514e" text-anchor="middle">10</text>
+<line x1="286.0" y1="86" x2="286.0" y2="432" stroke="#e4e3e0" stroke-width="1"/>
+<text x="286.0" y="450" font-size="11" fill="#52514e" text-anchor="middle">20</text>
+<line x1="392.0" y1="86" x2="392.0" y2="432" stroke="#e4e3e0" stroke-width="1"/>
+<text x="392.0" y="450" font-size="11" fill="#52514e" text-anchor="middle">30</text>
+<line x1="498.0" y1="86" x2="498.0" y2="432" stroke="#e4e3e0" stroke-width="1"/>
+<text x="498.0" y="450" font-size="11" fill="#52514e" text-anchor="middle">40</text>
+<line x1="604.0" y1="86" x2="604.0" y2="432" stroke="#e4e3e0" stroke-width="1"/>
+<text x="604.0" y="450" font-size="11" fill="#52514e" text-anchor="middle">50</text>
+<line x1="710.0" y1="86" x2="710.0" y2="432" stroke="#e4e3e0" stroke-width="1"/>
+<text x="710.0" y="450" font-size="11" fill="#52514e" text-anchor="middle">60</text>
+<text x="392.0" y="470" font-size="11.5" fill="#52514e" text-anchor="middle">ms / token</text>
+<text x="62" y="119.0" font-size="12.5" font-weight="500" fill="#0b0b0b" text-anchor="end">input</text>
+<path d="M74,96 H116.64 A4,4 0 0 1 120.64,100 V110 A4,4 0 0 1 116.64,114 H74 Z" fill="#2a78d6"/>
+<text x="127.6" y="109" font-size="11.5" fill="#52514e">4.4</text>
+<path d="M74,116 H112.4 A4,4 0 0 1 116.4,120 V130 A4,4 0 0 1 112.4,134 H74 Z" fill="#eb6834"/>
+<text x="123.4" y="129" font-size="11.5" fill="#52514e">4.0</text>
+<text x="62" y="183.0" font-size="12.5" font-weight="500" fill="#0b0b0b" text-anchor="end">attn</text>
+<path d="M74,160 H524.74 A4,4 0 0 1 528.74,164 V174 A4,4 0 0 1 524.74,178 H74 Z" fill="#2a78d6"/>
+<text x="535.7" y="173" font-size="11.5" fill="#52514e">42.9</text>
+<path d="M74,180 H357.26000000000005 A4,4 0 0 1 361.26000000000005,184 V194 A4,4 0 0 1 357.26000000000005,198 H74 Z" fill="#eb6834"/>
+<text x="368.3" y="193" font-size="11.5" fill="#52514e">27.1</text>
+<text x="62" y="247.0" font-size="12.5" font-weight="500" fill="#0b0b0b" text-anchor="end">ffn</text>
+<path d="M74,224 H143.14000000000001 A4,4 0 0 1 147.14000000000001,228 V238 A4,4 0 0 1 143.14000000000001,242 H74 Z" fill="#2a78d6"/>
+<text x="154.1" y="237" font-size="11.5" fill="#52514e">6.9</text>
+<path d="M74,244 H138.9 A4,4 0 0 1 142.9,248 V258 A4,4 0 0 1 138.9,262 H74 Z" fill="#eb6834"/>
+<text x="149.9" y="257" font-size="11.5" fill="#52514e">6.5</text>
+<text x="62" y="311.0" font-size="12.5" font-weight="500" fill="#0b0b0b" text-anchor="end">ple</text>
+<path d="M74,288 H160.1 A4,4 0 0 1 164.1,292 V302 A4,4 0 0 1 160.1,306 H74 Z" fill="#2a78d6"/>
+<text x="171.1" y="301" font-size="11.5" fill="#52514e">8.5</text>
+<path d="M74,308 H153.74 A4,4 0 0 1 157.74,312 V322 A4,4 0 0 1 153.74,326 H74 Z" fill="#eb6834"/>
+<text x="164.7" y="321" font-size="11.5" fill="#52514e">7.9</text>
+<text x="62" y="375.0" font-size="12.5" font-weight="500" fill="#0b0b0b" text-anchor="end">head</text>
+<path d="M74,352 H675.26 A4,4 0 0 1 679.26,356 V366 A4,4 0 0 1 675.26,370 H74 Z" fill="#2a78d6"/>
+<text x="686.3" y="365" font-size="11.5" fill="#52514e">57.1</text>
+<path d="M74,372 H596.82 A4,4 0 0 1 600.82,376 V386 A4,4 0 0 1 596.82,390 H74 Z" fill="#eb6834"/>
+<text x="607.8" y="385" font-size="11.5" fill="#52514e">49.7</text>
+</svg>
+
+</div>
+
+<table>
+<tr><th>ms / token</th><th class="num">input</th><th class="num">attn</th><th class="num">ffn</th>
+<th class="num">ple</th><th class="num">head</th><th class="num">wall</th><th class="num">tok/s</th></tr>
+<tr><td><strong>C reference</strong></td><td class="num">4.4</td><td class="num">42.9</td>
+<td class="num">6.9</td><td class="num">8.5</td><td class="num">57.1</td>
+<td class="num"><strong>122.0</strong></td><td class="num">8.20</td></tr>
+<tr><td><strong>Rust</strong></td><td class="num">4.0</td><td class="num">27.1</td>
+<td class="num">6.5</td><td class="num">7.9</td><td class="num">49.7</td>
+<td class="num"><strong>95.2</strong></td><td class="num">10.50</td></tr>
+<tr><td><strong>ratio</strong></td>
+<td class="num win-cell">0.91×</td><td class="num win-cell">0.63×</td>
+<td class="num win-cell">0.94×</td><td class="num win-cell">0.93×</td>
+<td class="num win-cell">0.87×</td><td class="num win-cell"><strong>0.78×</strong></td>
+<td class="num"></td></tr>
+</table>
+
+<p><strong>28.2% faster per token, faster on all five stages, byte-identical output.</strong>
+From 311.5 ms at the first working build — a 3.3× improvement over ourselves, and 1.28× over
+the C we were trying to catch. An opt-in 120 MHz memory-bus build reaches <strong>91.8 ms / 10.89 tok/s — 32.9%
+faster than C</strong>; it is not the default, because it needs an experimental ESP-IDF flag and
+Espressif documents 120 MHz as temperature-sensitive outside the commercial range.</p>
+
+<h3>What is left</h3>
+<ul>
+<li><strong>32-bit weight loads</strong> — four bytes per load plus an extract, instead of
+four single-byte loads. Would require the first <span class="mono">unsafe</span> in the core
+crate, for alignment.</li>
+<li><strong>Four rows at two lanes</strong> — eight live accumulators instead of sixteen, for
+the same reduction in activation loads that just failed. Cheap to try, genuinely uncertain.</li>
+<li><strong>fp16 KV cache</strong> — halves what attention streams, and attention is the
+stage that actually streams. Measured and undecided: it is the only remaining lever that
+would cost exactness, and this project has not spent any yet.</li>
+</ul>
+
+<!-- ============ 8 ============ -->
+<h2><span class="num">08</span>What we'd tell the next person</h2><div class="rule"></div>
+
+<div class="box">
+  <div class="tag">Build the instrument before the optimization</div>
+  <p>Every real win here came from a measurement built to answer one question — cycles/MAC
+  cache-resident versus streaming, both cores reading at once, the four-way attention
+  breakdown. Every wasted day came from reasoning about a number nobody had taken.</p>
+</div>
+
+<div class="box">
+  <div class="tag">A null result expires</div>
+  <p>Packing the head measured 0.0 ms and was worth 13 ms four changes later. The measurement
+  was correct both times; what changed was everything around it. Nothing in a performance
+  codebase is permanently settled.</p>
+</div>
+
+<div class="box">
+  <div class="tag">Write the failure mode down before you flash</div>
+  <p>The four-row experiment named its own register-spill risk in the commit message before it
+  was measured. When cycles/MAC went the wrong way there was no argument about what had
+  happened — the diagnosis was already written, and the revert took ten minutes.</p>
+</div>
+
+<div class="box">
+  <div class="tag">Keep the negative results in the table</div>
+  <p>Three are visible in the published benchmark today, marked and excluded from the
+  headline. They are the most useful rows there: a plausible idea with a number attached, so
+  the next person to have it finds the measurement instead of spending a day reproducing it.</p>
+</div>
+
+<div class="final">
+  <h3>And check the thing you cannot see</h3>
+  <p>The single most valuable line of output this project produces is a sixteen-digit
+  hexadecimal number that has never once been wrong. <strong>It is what makes every other
+  number in this report mean something.</strong></p>
+</div>
+
+</body>
+</html>

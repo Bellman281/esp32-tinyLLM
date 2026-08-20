@@ -95,7 +95,7 @@ const EXPECTED_TOKEN_DIGEST: u64 = 0x327578cb136fd6aa;
 ///
 /// Companion piece: `esp32-ai/esp32-llm-lab/chat_device.py`, a new script
 /// living next to (not replacing) `chat.py` -- it reuses `chat.py`'s own
-/// `encode()` untouched (per MIGRATION_PLAN.md, that tokenizer stays
+/// `encode()` untouched (by design, that tokenizer stays
 /// Python-side, off-chip) and sends its output here instead of piping it
 /// into a host-compiled `gen_prompt` the way `chat.py` itself does.
 ///

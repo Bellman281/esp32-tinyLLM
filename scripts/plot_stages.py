@@ -189,7 +189,64 @@ def svg(doc, runs, mode):
     return "\n".join(o) + "\n</svg>\n"
 
 
-def table(doc, runs):
+def summary(doc, runs):
+    """README's three rows: the reference, now, and the ratio between them.
+
+    The front page used to carry the same 24-row table BENCHMARKING.md carries,
+    plus six footnotes -- roughly 60 lines of a 192-line README, and the six
+    footnotes rendered as one 500-word paragraph. A reader arriving at the repo
+    wants one question answered: is the Rust port faster than the C it was
+    ported from, and by how much. Three rows answer that. The history is a
+    click away and belongs to whoever wants it.
+    """
+    ref = next((rb for _, rb in runs if rb["engine"] == "c"), runs[0][1])
+    ship = [rb for _, rb in runs if not rb.get("experimental")]
+    now = (ship or [rb for _, rb in runs])[-1]
+    fast = [rb for _, rb in runs if "fast-mspi" in str(rb["label"])
+            and "pre-" not in str(rb["label"])]
+
+    # THREE ROWS, and the opt-in build is one of them rather than a footnote.
+    # It is a real measurement of the same engine on the same board, bit-exact,
+    # and burying it under the table made it read as a downgrade for a while.
+    # It is still not the ratio row: `ratio` and the headline percentage
+    # describe the build you get by cloning, because that is what a claim about
+    # this repo has to mean.
+    o = ["| ms/token | " + " | ".join(STAGES) + " | **wall** | tok/s |",
+         "|---" * (len(STAGES) + 3) + "|"]
+    o.append(f"| **{ref['label']}** | " +
+             " | ".join(f"{ref[st]:.1f}" for st in STAGES) +
+             f" | **{ref['wall_ms']:.1f}** | {ref['tok_s']:.2f} |")
+    o.append(f"| **Rust** | " + " | ".join(f"{now[st]:.1f}" for st in STAGES) +
+             f" | **{now['wall_ms']:.1f}** | {now['tok_s']:.2f} |")
+    if fast:
+        f = fast[-1]
+        o.append(f"| **Rust, `--fast-mspi`** ‡ | " +
+                 " | ".join(f"{f[st]:.1f}" for st in STAGES) +
+                 f" | **{f['wall_ms']:.1f}** | {f['tok_s']:.2f} |")
+    o.append("| ratio | " + " | ".join(f"{now[st]/ref[st]:.2f}x" for st in STAGES) +
+             f" | **{now['wall_ms']/ref['wall_ms']:.2f}x** | |")
+
+    pct = (ref["wall_ms"] / now["wall_ms"] - 1.0) * 100.0
+    beat = sum(1 for st in STAGES if now[st] < ref[st])
+    o += ["", f"**{abs(pct):.1f}% faster per token than the C reference it was "
+              f"ported from**, on the same board, with byte-identical output — "
+              f"and faster on {beat} of the {len(STAGES)} stages."]
+    if fast:
+        f = fast[-1]
+        fpct = (ref["wall_ms"] / f["wall_ms"] - 1.0) * 100.0
+        o += ["", f"‡ **{f['wall_ms']:.1f} ms / {f['tok_s']:.2f} tok/s "
+                  f"({abs(fpct):.1f}% faster than C)** with one flag — "
+                  f"`./scripts/run_device.sh --fast-mspi` runs the memory bus at "
+                  f"120 MHz. Same engine, same bit-exact output; not the default "
+                  f"because it needs an experimental ESP-IDF flag and Espressif "
+                  f"documents 120 MHz as temperature-sensitive outside the "
+                  f"commercial range. The ratio row above is the build you get by "
+                  f"cloning. Full history — every run, every dead end — in "
+                  f"[BENCHMARKING.md](./BENCHMARKING.md)."]
+    return "\n".join(o)
+
+
+def table(doc, runs, brief=False):
     """BENCHMARKING.md's own orientation: runs as rows, stages as columns.
 
     Matches the table that was already there rather than imposing a new shape,
@@ -242,20 +299,45 @@ def table(doc, runs):
                  " | ".join(f"{last[st]-prev[st]:+.1f}" for st in STAGES) +
                  f" | {tot(last)-tot(prev):+.1f} | **{last['wall_ms']-prev['wall_ms']:+.1f}** | |")
 
+    # The ‡ notes. Three things were wrong with emitting one paragraph per run:
+    #
+    #  1. Consecutive lines with no blank between them are ONE paragraph in
+    #     Markdown, so six footnotes rendered as a single wall of text.
+    #  2. Every one of them repeated the same 18 words about not being the
+    #     shipping configuration -- state the rule once instead.
+    #  3. Full notes are the right length for BENCHMARKING.md and far too long
+    #     for a README that a reader is skimming for a number. `brief` gives
+    #     the README the first sentence and a pointer.
     exp_runs = [rb for _, rb in runs if rb.get("experimental")]
     if exp_runs:
-        o.append("")
+        o += ["", "‡ **Not the shipping configuration** — real, reproducible and "
+                  "bit-exact, but excluded from the ratios, the headline and the "
+                  "chart, because they describe what you get by cloning this "
+                  "repo." + (" Full detail in [BENCHMARKING.md](./BENCHMARKING.md)."
+                             if brief else ""), ""]
         for rb in exp_runs:
-            o.append(f"‡ **{rb['label']} is not the shipping configuration** and is "
-                     f"excluded from the ratios and the summary below. "
-                     f"{rb.get('experimental_note', '')}")
+            note = str(rb.get("experimental_note", "")).strip()
+            if brief:
+                # Leading sentences up to ~140 chars. Not "the first sentence":
+                # several of these open with "A negative result, and a predicted
+                # one." -- true, and useless without the number that follows.
+                # Boundary excludes "9.75 tok/s." and "1.32 MB." style periods.
+                parts, acc = re.split(r"(?<![A-Z0-9])\.\s", note), []
+                for part in parts:
+                    acc.append(part)
+                    if len(". ".join(acc)) >= 140:
+                        break
+                note = ". ".join(acc).rstrip(".") + "."
+                if len(acc) < len(parts):
+                    note += " [Full note.](./BENCHMARKING.md)"
+            o.append(f"- **{rb['label']}** — {note}")
 
     notes = [rb for _, rb in runs if rb.get("provisional_stages")]
     if notes:
-        o.append("")
+        o += ["", "† **Provisional** — measured, but not yet pinned down.", ""]
         for rb in notes:
             stg = ", ".join(f"`{x}`" for x in str(rb["provisional_stages"]).split())
-            o.append(f"† **{rb['label']}: {stg} is provisional.** {rb.get('note', '')}")
+            o.append(f"- **{rb['label']}** ({stg}) — {rb.get('note', '')}")
 
     sub = attn_table(runs)
     if sub:
@@ -382,6 +464,7 @@ def main():
                          "default is the first two and the last -- where it started, the "
                          "reference, and where it is now")
     ap.add_argument("--table", action="store_true", help="print the markdown table to stdout")
+    ap.add_argument("--brief", action="store_true", help="short ‡ notes, as README.md gets")
     ap.add_argument("--inject", nargs="*", metavar="FILE",
                     default=None, help="rewrite the marked table region in these files "
                                        "(default: README.md BENCHMARKING.md)")
@@ -395,12 +478,19 @@ def main():
         sys.exit(f"plot_stages: no [run.{missing[0]}] in {DATA}")
 
     if a.table:
-        print(table(doc, runs))
+        print(table(doc, runs, brief=a.brief))
         return
 
     if a.inject is not None:
-        inject(a.inject or ["README.md", "BENCHMARKING.md"],
-               table(doc, runs), inline_figures(runs))
+        figs = inline_figures(runs)
+        for rel in (a.inject or ["README.md", "BENCHMARKING.md"]):
+            # README is skimmed for a number; BENCHMARKING is read. Same
+            # table, same figures, different note length.
+            # README gets three rows and a sentence; BENCHMARKING gets the
+            # full history. Same source, same figures, different audience.
+            body = (summary(doc, runs) if rel.endswith("README.md")
+                    else table(doc, runs))
+            inject([rel], body, figs)
         return
 
     # The table can hold every run; the chart cannot, and a chart with one bar
@@ -409,13 +499,23 @@ def main():
     if a.chart_runs:
         want = [r.strip() for r in a.chart_runs.split(",") if r.strip()]
         chart = runs_of(doc, want)
-    elif len(runs) > 3:
-        # Same rule as the table's headline: an experimental run is shown in
-        # the table but must not become the "now" bar in the README's chart,
-        # which is the one figure most people will read and none of them will
-        # read the footnote for.
+    elif len(runs) > 2:
+        # TWO BARS: the C reference, and where Rust is now. Nothing else.
+        #
+        # This used to be three -- C, the first Rust run, and now -- and the
+        # third bar was doing harm. "Rust, first run" was 311.5 ms/token, two
+        # and a half times the C reference, so it set the chart's x-axis and
+        # squashed the two bars anyone actually wants to compare into the left
+        # fifth of the plot. It also answered a question nobody asked: the
+        # optimization history is what the table is for, and the table has all
+        # 24 rows of it.
+        #
+        # Same rule as the table's headline: an experimental run appears in the
+        # table but must never become the "now" bar, which is the one figure
+        # most people will read and none of them will read the footnote for.
         ship = [r for r in runs if not r[1].get("experimental")]
-        chart = [runs[0], runs[1], (ship or runs)[-1]]
+        ref = next((r for r in runs if r[1]["engine"] == "c"), runs[0])
+        chart = [ref, (ship or runs)[-1]]
 
     os.makedirs(OUT, exist_ok=True)
     for mode, name in (("light", "benchmark-stages.svg"), ("dark", "benchmark-stages-dark.svg")):

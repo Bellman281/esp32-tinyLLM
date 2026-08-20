@@ -1,158 +1,84 @@
 # esp32-tinyLLM
 
-**A 28.9M-parameter language model running on an $8 microcontroller — rewritten in Rust.**
+**A 28.9M-parameter language model running on an $8 microcontroller — rewritten in Rust,
+and faster than the C it was ported from.**
 
-The ESP32-S3 has 512 KB of SRAM. This model has 28.9M parameters. It fits because
-~25M of them live in a flash-mapped Per-Layer Embedding table (Gemma 3n's trick,
-three orders of magnitude down) and the rest are 4-bit quantized. It writes short
-stories at <!--fig:tok_s-->10.50<!--/fig--> tok/s — see the measured table below.
-
-This repo is a ground-up Rust port of the inference engine, ported function for
-function from [slvDev/esp32-ai](https://github.com/slvDev/esp32-ai)'s C
-implementation — with every step checked against the C version's own output.
+The ESP32-S3 has 512 KB of SRAM. This model has 28.9M parameters. It fits because ~25M of
+them live in a flash-mapped Per-Layer Embedding table (Gemma 3n's trick, three orders of
+magnitude down) and the rest are 4-bit quantized. It writes short children's stories at
+<!--fig:tok_s-->10.50<!--/fig--> tok/s — it cannot answer questions or follow
+instructions, which is the point.
 
 ![The model generating stories from the CLI](./png/1.jpg)
 
-It writes children's stories — it cannot answer questions or follow instructions,
-which is the point: it's small enough to run on a microcontroller.
-
-## Quick start
-
-No hardware needed for any of this:
-
-```bash
-# run the test suite (verifies Rust against the C reference)
-cd engine/llm-host && cargo test --release
-
-# chat with the model on your laptop
-cd demo && sh run_cli.sh
-
-# time the two engines against each other
-scripts/bench_host.py
-```
-
-On a board: `cd engine/llm-firmware && cargo run --release`.
-
-## Status
-
-| Phase | What | State |
-|---|---|---|
-| 1 | `llm-core` — portable `no_std` model math | done, parity-verified |
-| 2 | `llm-host` — CLI tools + correctness tests | done, parity-verified |
-| 3 | `llm-firmware` — on-device build | runs on real hardware; closing the perf gap |
-| 4 | `llm-display` — optional OLED/TFT screen | not started |
-| 5–6 | `bandwidth_bench` port; drop FreeRTOS for `esp-hal` | not started |
-
-### C vs Rust, measured on hardware
+## C vs Rust, on the same board
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./png/benchmark-stages-dark.svg">
   <img alt="Per-stage inference cost, C vs Rust" src="./png/benchmark-stages.svg">
 </picture>
 
-Both firmwares emit **byte-identical text** — same 400 tokens, cut off at the same
-word. Every stage is now faster than C, the output head included. The board proves it rather than being taken at its word: it folds every
-token id it emits into a digest and prints it, and
-[`model/models.toml`](./model/models.toml) pins the value that
-`llm-host/tests/token_stream_digest.rs` recomputes on the host. A run that
-diverges by one token says so, loudly, in the same output as the timings — and
-a firmware that is fast because it computes something else is not a result.
-
 <!-- BEGIN device-table (generated: scripts/plot_stages.py --inject) -->
 
-| ms/token | input | attn | ffn | ple | head | stages | **wall** | tok/s |
-|---|---|---|---|---|---|---|---|---|
-| **C reference** | 4.4 | 42.9 | 6.9 | 8.5 | 57.1 | 119.8 | **122.0** | 8.20 |
-| **Rust, first run** | 10.6 | 66.7 | 15.8 | 20.4 | 193.8 | 307.3 | **311.5** | 3.21 |
-| **+ dual-core head, unroll** | 8.0 | 58.9 | 11.8 | 15.1 | 110.9 | 204.7 | **208.8** | 4.79 |
-| **+ wider caches** | 7.4 | 53.7 | 11.2 | 14.3 | 87.6 | 174.2 | **177.3** | 5.64 |
-| **Rust, before** | 7.8 | 54.4 | 11.9 | 15.2 | 94.6 | 183.9 | **187.2** | 5.34 |
-| **Rust, nibble LUT** | 6.6 | 50.8 | 10.1 | 12.7 | 98.0 | 178.2 | **181.6** | 5.51 |
-| **Rust, + KV layout** | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | 171.2 | **174.6** | 5.73 |
-| **+ int4 head** | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | 171.2 | **174.6** | 5.73 |
-| **+ 4 accumulators** | 6.6 | 47.0 | 10.1 | 12.7 | 81.3 | 157.7 | **161.0** | 6.21 |
-| **+ bias hoist** | 6.6 | 47.0 | 10.1 | 12.7 | 61.5 | 137.9 | **140.9** | 7.09 |
-| **+ dual-core matvec** | 3.9 | 40.2 | 6.2 | 7.5 | 61.6 | 119.4 | **122.7** | 8.15 |
-| **+ argmax/stdout** | 3.8 | 39.8 | 6.0 | 7.3 | 61.5 | 118.4 | **121.1** | 8.25 |
-| **+ argmax in head** | 3.9 | 40.0 | 6.1 | 7.5 | 61.5 | 119.0 | **119.0** | 8.40 |
-| **+ attn instrumented** | 3.9 | 39.0 | 6.2 | 7.6 | 61.9 | 118.6 | **118.5** | 8.43 |
-| **+ attn heads split** | 3.9 | 26.4 | 6.2 | 7.6 | 62.7 | 106.8 | **106.8** | 9.36 |
-| **+ token digest** | 3.9 | 26.3 | 6.2 | 7.6 | 62.3 | 106.3 | **106.3** | 9.41 |
-| **+ MSPI bus 120 MHz** ‡ | 3.6 | 24.5 | 5.7 | 7.0 | 62.1 | 102.9 | **102.9** | 9.71 |
-| **+ int8 head (reverted)** ‡ | 4.0 | 26.8 | 6.2 | 7.6 | 76.9 | 121.5 | **121.6** | 8.23 |
-| **+ probe, always on** ‡ | 3.8 | 26.2 | 6.0 | 7.3 | 63.2 | 106.5 | **106.6** | 9.38 |
-| **+ probe opt-in** | 3.9 | 26.3 | 6.2 | 7.6 | 62.2 | 106.2 | **106.3** | 9.41 |
-| **Rust, --fast-mspi (pre-i16)** ‡ | 3.8 | 24.7 | 6.0 | 7.3 | 60.9 | 102.7 | **102.6** | 9.75 |
-| **+ i16 activations** | 3.9 | 26.8 | 6.2 | 7.7 | 55.3 | 99.9 | **100.0** | 10.00 |
-| **Rust, now** | 4.0 | 27.1 | 6.5 | 7.9 | 49.7 | 95.2 | **95.2** | 10.50 |
-| **+ four rows per pass** ‡ | 3.9 | 27.0 | 6.1 | 7.4 | 52.8 | 97.2 | **97.1** | 10.30 |
-| **Rust, --fast-mspi** ‡ | 3.9 | 25.6 | 6.3 | 7.7 | 48.2 | 91.7 | **91.8** | 10.89 |
-| ratio vs C reference | 0.91x | 0.63x | 0.94x | 0.93x | 0.87x | 0.79x | **0.78x** | |
-| absolute gap | -0.4 | -15.8 | -0.4 | -0.6 | -7.4 | -24.6 | **-26.8** | |
-| **change this brought** | +0.1 | +0.3 | +0.3 | +0.2 | -5.6 | -4.7 | **-4.8** | |
+| ms/token | input | attn | ffn | ple | head | **wall** | tok/s |
+|---|---|---|---|---|---|---|---|
+| **C reference** | 4.4 | 42.9 | 6.9 | 8.5 | 57.1 | **122.0** | 8.20 |
+| **Rust** | 4.0 | 27.1 | 6.5 | 7.9 | 49.7 | **95.2** | 10.50 |
+| **Rust, `--fast-mspi`** ‡ | 3.9 | 25.6 | 6.3 | 7.7 | 48.2 | **91.8** | 10.89 |
+| ratio | 0.91x | 0.63x | 0.94x | 0.93x | 0.87x | **0.78x** | |
 
-‡ **+ MSPI bus 120 MHz is not the shipping configuration** and is excluded from the ratios and the summary below. Requires CONFIG_IDF_EXPERIMENTAL_FEATURES; Espressif documents 120 MHz as temperature-sensitive and not recommended across the industrial range, and this board's boya flash part refused it and fell back. Real, reproducible, bit-exact -- and not what you get by cloning this repo. It was a +3.3% opt-in AT THE TIME; the engine has moved twice since, and [run.rust-fast-mspi-dot2] is the current measurement of the same flag.
-‡ **+ int8 head (reverted) is not the shipping configuration** and is excluded from the ratios and the summary below. A negative result, kept because it corrects a claim this file made. Staging the head as unpacked int8 instead of packed int4 -- the C reference's format, and one fewer operation per element -- made the head 62.3 -> 76.9 ms and the token 106.3 -> 121.5. Reverted. Bit-exact throughout: the digest still printed OK, so this is purely a cost.
-‡ **+ probe, always on is not the shipping configuration** and is excluded from the ratios and the summary below. Superseded by [run.rust-findings-off]. Kept because it is the measurement that justified making the probe opt-in: identical arithmetic, 0.3 ms slower, purely from ~50 lines sitting in head.rs.
-‡ **Rust, --fast-mspi (pre-i16) is not the shipping configuration** and is excluded from the ratios and the summary below. One flag from the default build -- scripts/run_device.sh --fast-mspi -- and not the default, for reasons about other boards rather than this one: CONFIG_IDF_EXPERIMENTAL_FEATURES, Espressif documenting 120 MHz as temperature-sensitive, and this board's boya flash part refusing it and falling back. Bit-exact: 102.6 ms/token, 9.75 tok/s, 18.9% faster than the C reference, digest 0x327578cb136fd6aa OK. SUPERSEDED as a description of the flag -- this was measured before i16 activations and two rows per pass, so it now reads slower than the shipping default. See [run.rust-fast-mspi-dot2] for the same flag on the current engine.
-‡ **+ four rows per pass is not the shipping configuration** and is excluded from the ratios and the summary below. A negative result, and a predicted one. Two rows per pass took the head's activation loads to 0.5 per multiply-accumulate; four would take them to 0.25, and on an issue-bound loop that should be the whole win. It is not: four rows need four lane sets, and at DOT_LANES = 4 that is sixteen live accumulators on a machine with sixteen visible address registers. The allocator spilled. Head 49.3 -> 52.8 ms and the token 93.7 -> 97.1, measured in the probe build against the probe build; cycles/MAC went the wrong way, 8.13 -> 8.41, which is the spill showing up directly. Reverted. Bit-exact throughout -- the digest still printed OK -- so this is purely a cost. The arithmetic is kept in llm_core::dot4_int4_int16, tested, off the hot path.
-‡ **Rust, --fast-mspi is not the shipping configuration** and is excluded from the ratios and the summary below. The opt-in 120 MHz MSPI clock, re-measured on the current engine -- the earlier [run.rust-fast-mspi] row was taken before i16 activations and two rows per pass, and had gone stale enough to read as a downgrade. 91.8 ms/token, 10.89 tok/s: 3.6% under the shipping default's 95.2 and 24.8% under the C reference. The two effects compose, which is what you would expect of a memory-side change against two instruction-side ones -- the bus went 68 -> 75 MB/s on the probe and the head, which is compute-bound, moved only 49.7 -> 48.2 while attn (the stage that actually streams) took 27.1 -> 25.6. Still not the default: it needs CONFIG_IDF_EXPERIMENTAL_FEATURES, Espressif documents 120 MHz as temperature-sensitive outside the commercial range, and this board's boya flash part logs 'High performance mode of this flash model hasn't been supported' and stays at its own clock while PSRAM alone goes to 120. Bit-exact: digest 0x327578cb136fd6aa OK.
+**28.2% faster per token than the C reference it was ported from**, on the same board, with byte-identical output — and faster on 5 of the 5 stages.
 
-**`attn` broken down** — the sub-stages the five-stage profile hides. `qkv`/`proj` are the fp32 matvec that also drives `ffn` and `ple`; `core` is attention proper, the only part that grows with sequence position. The C reference has no equivalent instrumentation, so it is absent rather than zero.
-
-| attn ms/token | qkv | rope | core | proj | sum | both cores |
-|---|---|---|---|---|---|---|
-| **+ attn instrumented** | 7.8 | 0.14 | 28.3 | 2.7 | 38.9 | `qkv`, `proj` |
-| **+ attn heads split** | 7.9 | 0.15 | 15.6 | 2.7 | 26.3 | `qkv`, `proj`, `core` |
-| **+ token digest** | 7.8 | 0.15 | 15.6 | 2.7 | 26.2 | `qkv`, `proj`, `core` |
-| **+ MSPI bus 120 MHz** | 7.2 | 0.15 | 14.7 | 2.5 | 24.6 | `qkv`, `proj`, `core` |
-| **+ int8 head (reverted)** | 7.9 | 0.15 | 16.0 | 2.7 | 26.8 | `qkv`, `proj`, `core` |
-| **+ probe, always on** | 7.6 | 0.15 | 15.9 | 2.6 | 26.2 | `qkv`, `proj`, `core` |
-| **+ probe opt-in** | 7.8 | 0.15 | 15.6 | 2.7 | 26.2 | `qkv`, `proj`, `core` |
-| **Rust, --fast-mspi (pre-i16)** | 7.5 | 0.15 | 14.5 | 2.6 | 24.8 | `qkv`, `proj`, `core` |
-| **+ i16 activations** | 7.9 | 0.15 | 16.0 | 2.7 | 26.8 | `qkv`, `proj`, `core` |
-| **Rust, now** | 8.2 | 0.15 | 15.8 | 2.9 | 27.0 | `qkv`, `proj`, `core` |
-| **+ four rows per pass** | 7.7 | 0.15 | 16.5 | 2.7 | 27.1 | `qkv`, `proj`, `core` |
-| **Rust, --fast-mspi** | 8.0 | 0.15 | 14.8 | 2.8 | 25.8 | `qkv`, `proj`, `core` |
-
-**Rust is 28.2% faster per token than the C reference it was ported from** — 95.2 ms against 122.0, 10.50 tok/s against 8.20, on the same board with byte-identical output. It beats C on 5 of the 5 stages.
+‡ **91.8 ms / 10.89 tok/s (32.9% faster than C)** with one flag — `./scripts/run_device.sh --fast-mspi` runs the memory bus at 120 MHz. Same engine, same bit-exact output; not the default because it needs an experimental ESP-IDF flag and Espressif documents 120 MHz as temperature-sensitive outside the commercial range. The ratio row above is the build you get by cloning. Full history — every run, every dead end — in [BENCHMARKING.md](./BENCHMARKING.md).
 
 <!-- END device-table -->
 
-The `stages` column is the profiled sum and `wall` is what a user experiences.
-They differ by whatever runs outside the profiled stages: 2.2 ms/token for the
-C reference, 0.03 for Rust since the greedy pick moved into the head.
+Every figure above is generated from [`benchmarks/device.toml`](./benchmarks/device.toml)
+by `scripts/plot_stages.py`. Nothing here is typed by hand, so nothing here can go stale
+while the code moves.
 
-Everything above — table, sentence and chart — is measured on hardware and
-generated from [`benchmarks/device.toml`](./benchmarks/device.toml) by
-`scripts/plot_stages.py`, so a re-measurement updates all of them together and
-they cannot drift apart. Add a run, re-run the script; never hand-edit a figure
-here. Methodology and per-lever detail: [BENCHMARKING.md](./BENCHMARKING.md).
+## Byte-identical, and the board says so
 
-### Correctness
+Both firmwares emit the same 400 tokens, cut off at the same word. The board proves it
+rather than being taken at its word: it folds every token id it emits into a digest and
+prints it, and [`model/models.toml`](./model/models.toml) pins the value that
+`llm-host/tests/token_stream_digest.rs` recomputes on the host. A run that diverges by one
+token says so, loudly, in the same output as the timings.
 
-Correctness is enforced by tests, not by inspection: golden logits vs PyTorch,
-byte-identical CLI output vs the compiled C binary, and cross-entropy over real
-validation tokens — all six gates are described in
+That mattered more than expected. Two optimizations were reverted for being *slower*, and
+the digest is what certified each as purely a cost rather than a silent change in what the
+model computes. A firmware that is fast because it computes something else is not a result.
+
+Sixteen test files, 38 tests: golden logits against PyTorch, byte-identical CLI output
+against the compiled C binary, cross-entropy over real validation tokens, and a bit-exact
+equivalence gate for every optimization in the hot path —
 [`engine/llm-host/tests/README.md`](./engine/llm-host/tests/README.md).
 
-Two real bugs were caught that way during the port: an out-of-bounds scratch
-buffer for one model config, and a rounding-mode mismatch against C's `lrintf`.
-Both fixed.
+## Quick start
+
+No hardware needed:
+
+```bash
+cd engine/llm-host && cargo test --release   # verify Rust against the C reference
+cd demo && sh run_cli.sh                     # chat with the model on your laptop
+scripts/bench_host.py                        # time the two engines against each other
+```
+
+On a board: `./scripts/run_device.sh` flashes, monitors, and logs the run.
 
 ## Docs
 
 | | |
 |---|---|
-| [BENCHMARKING.md](./BENCHMARKING.md) | how the numbers were measured, and what to optimize next |
-| [ROADMAP.md](./ROADMAP.md) | what to do next, in order, and what's still unexplained |
+| [**The port story** (PDF)](./docs/esp32-tinyLLM-port-story.pdf) | how the port went — the wrong turns, the measurements that settled them, and the wins |
+| [BENCHMARKING.md](./BENCHMARKING.md) | method, full run history, and every dead end with its number |
 | [TRAINING.md](./TRAINING.md) | how `model.bin` was made — dataset → training → 4-bit PTQ → export |
-| [CONTRIBUTING.md](./CONTRIBUTING.md) | ground rules, and how to run the parity tests |
+| [model/README.md](./model/README.md) | the model registry, provenance, and how to add another |
+| [CONTRIBUTING.md](./CONTRIBUTING.md) | ground rules, and how to land a measured change |
+| [engine/llm-firmware/README.md](./engine/llm-firmware/README.md) | what runs on the device, and how it maps to the C |
 
-Reading the code: [`MIGRATION_PLAN.md`](./MIGRATION_PLAN.md) for why the port is
-shaped this way, then `engine/llm-core/src/tensor.rs` and `model.rs` for the
-ported math, then `engine/llm-host/tests/`. The model itself, its provenance and
-how to add another: [`model/README.md`](./model/README.md).
+The story's source is [`docs/story.html`](./docs/story.html) — the PDF is rendered from it,
+so it can be re-rendered when a number changes rather than redrawn.
 
 ## Repo layout
 
@@ -164,29 +90,24 @@ engine/            the Rust workspace
   llm-display/       optional demo screen (not started)
 model/             trained models, one folder per registry entry, + models.toml
 reference-c/       the C engine this port is checked against (build fixes only)
-training/          the Python training pipeline, vendored for reference
+training/          the Python training pipeline, vendored from upstream
 demo/              interactive CLI over either engine
-scripts/           model.sh (registry reader), bench_host.py
+scripts/           run_device.sh, plot_stages.py, disasm_*.sh, bench_host.py
 ```
 
-[`model/models.toml`](./model/models.toml) is the registry: it names model files,
-benchmark settings, and expected parity values *once*, and both languages read it
-— Rust via `llm_host::manifest`, C-side tooling via `scripts/model.sh` — so they
-cannot drift apart.
+[`model/models.toml`](./model/models.toml) is the registry: it names model files, benchmark
+settings and expected parity values *once*, and both languages read it — Rust via
+`llm_host::manifest`, C-side tooling via `scripts/model.sh` — so they cannot drift apart.
 
-## Contributing
+## Credits
 
-The main open work is closing the Rust-vs-C gap. [`ROADMAP.md`](./ROADMAP.md)
-sequences it — two cheap unknowns gate most of the expensive work, so start there
-rather than with the SIMD items.
-
-Also built on: [llama2.c](https://github.com/karpathy/llama2.c) (the single-file C
-inference style `llm.h` follows), TinyStories (Eldan & Li 2023,
-[arXiv:2305.07759](https://arxiv.org/abs/2305.07759)), and Google's Gemma 3n
-Per-Layer Embeddings.
+Ported function for function from [slvDev/esp32-ai](https://github.com/slvDev/esp32-ai).
+Also built on [llama2.c](https://github.com/karpathy/llama2.c) (the single-file C inference
+style `llm.h` follows), TinyStories (Eldan & Li 2023,
+[arXiv:2305.07759](https://arxiv.org/abs/2305.07759)), and Google's Gemma 3n Per-Layer
+Embeddings.
 
 ## License
 
-Apache 2.0 for this repo's code ([LICENSE](./LICENSE)). `reference-c/` is vendored
-from upstream and keeps its original MIT terms
-([`reference-c/LICENSE`](./reference-c/LICENSE)).
+Apache 2.0 for this repo's code ([LICENSE](./LICENSE)). `reference-c/` and `training/` are
+vendored from upstream and keep their original MIT terms.

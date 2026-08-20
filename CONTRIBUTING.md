@@ -1,9 +1,31 @@
 # Contributing
 
-The main open work right now is closing the Rust-vs-C performance gap — see
-the README's "Status" section for the current measured numbers, and
-[BENCHMARKING.md](./BENCHMARKING.md)'s "What to optimize next" for the two
-real levers, ranked, with what is already built for each. Start there.
+There is no Rust-vs-C performance gap left to close. The engine ships at
+95.2 ms/token (10.50 tok/s) against the C reference's 122.0 ms (8.20 tok/s),
+and all five stages — `input`, `attn`, `ffn`, `ple`, `head` — are now faster
+than C. So the work here is no longer "catch up"; it is keeping the three
+things that got it here:
+
+1. **Improvements are measured, not argued.** A change to `llm-firmware` is
+   not done until it has been timed on a real ESP32-S3 and its numbers are in
+   `benchmarks/device.toml`. "Should be faster" is a hypothesis, and several
+   plausible ones in this repo turned out to be wrong.
+2. **Negative results are recorded, not discarded.** Staging the head as int8
+   instead of int4, and computing four head rows per pass instead of two, both
+   looked obviously right and both made the token slower. They live in
+   `benchmarks/device.toml` as `experimental = 1` runs with the reasoning
+   attached, because a measurement that says "don't" is worth as much as one
+   that says "do" — and deleting it means someone re-runs it in a year.
+3. **Bit-exactness is maintained.** Every device-measured speedup so far has
+   been exact: `golden.rs` / `cli_parity.rs` / `ppl_parity.rs` hold the engine
+   to the C reference with no tolerance on the fp32 path, and the firmware
+   prints a digest of its own 400-token stream (`0x327578cb136fd6aa`) that
+   `token_stream_digest.rs` recomputes on the host. Giving that up is a real
+   decision that needs a measured cost, not an assumption (see
+   `fp16_kv_tolerance.rs` for what that looks like).
+
+[BENCHMARKING.md](./BENCHMARKING.md) has the measured numbers, the per-stage
+breakdown, and what is left worth trying. Start there.
 
 ## Ground rules
 
@@ -20,7 +42,9 @@ real levers, ranked, with what is already built for each. Start there.
 2. **`llm-core` stays platform-agnostic** (`no_std`, no ESP32-specific code).
    Platform-specific speedups (like the dual-core head split, or the planned
    `esp-dsp` SIMD hook) belong in `llm-firmware`, wired in behind a fallback
-   to the portable scalar path. See `MIGRATION_PLAN.md` for the reasoning.
+   to the portable scalar path. See
+   the crate split (`llm-core` stays `no_std` and platform-agnostic) for
+   the reasoning.
 3. **Every change to `llm-core` math must stay parity-verified**, not just
    "looks right." See below.
 4. **Model paths and expected values live in `model/models.toml`**, not in
@@ -28,7 +52,7 @@ real levers, ranked, with what is already built for each. Start there.
    a window count, or an expected cross-entropy, read it from the registry
    — `llm_host::manifest` in Rust, `scripts/model.sh` in shell/C. Adding a
    new hardcoded `const MODEL_BIN` is how the C and Rust sides drift apart.
-   See the README's "The model registry".
+   See [`model/README.md`](./model/README.md).
 
 ## Building and testing
 
@@ -60,7 +84,7 @@ on an actual ESP32-S3, not just compiled.
    `matvec_simd_tolerance.rs` is the worked example.
 2. Measure before and after on real hardware if the change touches
    `llm-firmware`; a host-only "should be faster" claim doesn't belong in
-   the README's numbers table. `git stash` / `git stash pop` around a
+   `benchmarks/device.toml`. `git stash` / `git stash pop` around a
    same-session A/B is the cheapest way to keep both sides honest — this
    workload is deterministic enough that two flashes of identical code
    reproduce to 0.1 ms/stage, so small deltas are real, not noise.
@@ -74,10 +98,34 @@ on an actual ESP32-S3, not just compiled.
    change it there and let that test tell you what else needs updating,
    rather than editing one firmware and moving on. The measurement
    methodology is in [BENCHMARKING.md](./BENCHMARKING.md).
-4. Update the per-stage timing tables in the README and
-   [BENCHMARKING.md](./BENCHMARKING.md) with your measured numbers, and say
-   what you changed and why in one or two sentences (see BENCHMARKING.md's
-   "Optimization history" for the format).
+4. **Do not hand-edit a benchmark figure.** Every per-stage table and chart in
+   [README.md](./README.md) and [BENCHMARKING.md](./BENCHMARKING.md) is
+   *generated* from `benchmarks/device.toml`; editing one by hand is the exact
+   failure the generator exists to prevent (two copies of a number, one of
+   them silently stale). The workflow is:
+
+   ```bash
+   # 1. add a [run.<id>] section to benchmarks/device.toml with your measured
+   #    stage figures, wall_ms, tok_s, plus date, commit and a note
+   # 2. regenerate every derived table and figure
+   python3 scripts/plot_stages.py --inject README.md BENCHMARKING.md
+   # 3. commit what it produced, alongside the device.toml change
+   ```
+
+   Runs appear in file order, which is chronological — so add a new section,
+   never edit an existing one to "update" it. The record of what was measured,
+   when, and against which tree is the point.
+
+   Set `experimental = 1` on any run that is not the configuration the repo
+   ships (an opt-in flag, a branch, a reverted experiment). Those still appear
+   in the table and chart, but they do not become the headline "now" figure.
+
+   **A negative result is recorded the same way, not deleted.** If your change
+   made things slower, it still gets a `[run.<id>]` with `experimental = 1`
+   and an `experimental_note` saying what you expected, what happened, and why
+   — see `[run.rust-head-int8]` and `[run.rust-dot4]` for the format. Both are
+   changes that looked obviously correct and cost time; the note is what stops
+   the next person paying for them again.
 
 ## Branches / PRs
 

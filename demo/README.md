@@ -10,7 +10,7 @@ is C/C++/Arduino code. `reference-c/` stays a strict, frozen mirror of
 [slvDev/esp32-ai](https://github.com/slvDev/esp32-ai)'s C source; this
 folder is the Python/shell convenience layer on top of it (the tokenizer
 encoder and an interactive prompt loop), which was never ported to C or
-Rust anywhere in this project by design — see `MIGRATION_PLAN.md`. The
+Rust anywhere in this project by design — by design. The
 actual inference code it runs (`gen_prompt.c`, `llm.h`, `model.bin`,
 `vocab.h`) lives in `../reference-c/esp32-llm-lab/`, untouched; this folder
 only adds `bpe32768.json` (the tokenizer) and the REPLs (`chat.py`,
