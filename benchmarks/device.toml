@@ -314,7 +314,9 @@ attn_proj = 2.7
 attn_dual = "qkv proj core"
 
 [run.rust-findings]
-label   = "Rust, now"
+label   = "+ probe, always on"
+experimental = 1
+experimental_note = "Superseded by [run.rust-findings-off]. Kept because it is the measurement that justified making the probe opt-in: identical arithmetic, 0.3 ms slower, purely from ~50 lines sitting in head.rs."
 engine  = "rust"
 date    = "2026-08-20"
 commit  = "perf/memory-findings tip -- probe + fp16 measurement + docs (467131a)"
@@ -330,4 +332,23 @@ attn_qkv  = 7.6
 attn_rope = 0.15
 attn_core = 15.9
 attn_proj = 2.6
+attn_dual = "qkv proj core"
+
+[run.rust-findings-off]
+label   = "Rust, now"
+engine  = "rust"
+date    = "2026-08-20"
+commit  = "build(firmware): put the bandwidth probe behind a feature (6128d54)"
+note    = "The same branch with the dual-core probe compiled out, which is now the default. Recovers the 0.3 ms that [run.rust-findings] cost and lands within 0.1 ms of [run.rust-digest] on every stage -- so merging this branch is free, which it was not an hour ago. The probe is still available: cargo run --release --features bandwidth-probe. Note the single-core probe reads 68 MB/s here against 72 in the probe-on binary, on identical code over an identical buffer: 68/72/73 across binaries now, the layout tax showing up in the instrument as readily as in the thing it measures."
+input   = 3.9
+attn    = 26.3
+ffn     = 6.2
+ple     = 7.6
+head    = 62.2
+wall_ms = 106.3
+tok_s   = 9.41
+attn_qkv  = 7.8
+attn_rope = 0.15
+attn_core = 15.6
+attn_proj = 2.7
 attn_dual = "qkv proj core"
