@@ -46,9 +46,7 @@ use core::sync::atomic::{AtomicI32, AtomicPtr, AtomicU32, AtomicUsize, Ordering}
 use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::hal::sys::{esp_timer_get_time, TaskHandle_t, TickType_t};
 use esp_idf_svc::hal::task;
-use llm_core::{
-    activation_sum_i16, dot2_int4_int16, dot4_int4_int16, quantize_activations_i16, QT,
-};
+use llm_core::{activation_sum_i16, dot2_int4_int16, quantize_activations_i16, QT};
 
 use crate::psram;
 
@@ -307,56 +305,27 @@ impl Head {
         let actq: &[i16] = &actq_all[..cols];
         let acts = f32::from_bits(self.acts.load(Ordering::Acquire));
         let act_sum = self.act_sum.load(Ordering::Acquire);
-        // FOUR ROWS PER PASS. The activation vector is identical for all
+        // TWO ROWS PER PASS. The activation vector is identical for all
         // 25,353 rows, and doing one row at a time reloads it for every one --
         // 2.43M `l16si` per token to read 96 distinct values. The head's loop
-        // measured issue-bound (8.13 cycles/MAC cache-resident against 9.01
-        // streaming, only 11% apart), so instruction count is the lever. Two
-        // rows per pass took the activation loads to 0.5/MAC; four takes them
-        // to 0.25.
+        // measured issue-bound (8.96 cycles/MAC cache-resident against 9.64
+        // streaming, only 8% apart), so instruction count is the lever and
+        // this removes one load per two multiply-accumulates.
         //
-        // THE RISK, stated before the measurement: four rows need four lane
-        // sets, and at DOT_LANES = 4 that is sixteen live accumulators on a
-        // machine with sixteen visible address registers. If the register
-        // allocator spills, the loads it adds cost more than the loads this
-        // removes -- and the stage gets SLOWER, not faster. The probe build's
-        // cycles/MAC line is what settles it; `scripts/disasm_head.sh` says
-        // why. This comment stays either way, because a reader finding four
-        // rows here should know it was a measured choice and not an assumed
-        // one.
+        // TWO, NOT FOUR, and that is a measurement rather than a default.
+        // `llm_core::dot4_int4_int16` exists, is bit-exact, and takes the
+        // activation loads to 0.25/MAC -- and wiring it in here made the head
+        // SLOWER: 49.3 -> 52.8 ms, with the probe's cycles/MAC rising
+        // 8.13 -> 8.41. Four rows at DOT_LANES = 4 is sixteen live
+        // accumulators on a machine with sixteen visible address registers, so
+        // the allocator spilled and the reloads cost more than the loads it
+        // saved. Two rows is where this board's register budget runs out.
         //
-        // Bit-exact: the four rows share a load and nothing else. Same terms,
+        // Bit-exact: the two rows share a load and nothing else. Same terms,
         // same order, same lanes, same hoisted bias -- asserted on every
-        // consecutive row quad of the shipped model, including the degenerate
-        // all-same-row case that would catch lane aliasing, by
+        // consecutive row pair of the shipped model by
         // llm-host/tests/dot2_equivalence.rs.
         let mut r = r0;
-        while r + 3 < r1 {
-            let accs = dot4_int4_int16(
-                [
-                    &w4[r * rb..r * rb + rb],
-                    &w4[(r + 1) * rb..(r + 1) * rb + rb],
-                    &w4[(r + 2) * rb..(r + 2) * rb + rb],
-                    &w4[(r + 3) * rb..(r + 3) * rb + rb],
-                ],
-                actq,
-                act_sum,
-            );
-            for (k, acc) in accs.iter().enumerate() {
-                let rr = r + k;
-                let val = *acc as f32 * scale8[rr] * acts;
-                // SAFETY: caller's contract -- `y[r0..r1]` is this call's alone.
-                unsafe { core::ptr::write(y.add(rr), val) };
-                // Strictly `>`, so the LOWEST index wins a tie, and the quad is
-                // visited in increasing order -- same token a 0..n scan picks.
-                if val > best_val {
-                    best_val = val;
-                    best_idx = rr;
-                }
-            }
-            r += 4;
-        }
-        // Up to three rows over. Pairs first, then a single.
         while r + 1 < r1 {
             let (acc_a, acc_b) = dot2_int4_int16(
                 &w4[r * rb..r * rb + rb],
@@ -368,6 +337,8 @@ impl Head {
                 let val = acc as f32 * scale8[rr] * acts;
                 // SAFETY: caller's contract -- `y[r0..r1]` is this call's alone.
                 unsafe { core::ptr::write(y.add(rr), val) };
+                // Strictly `>`, so the LOWEST index wins a tie, and the pair is
+                // visited in increasing order -- same token a 0..n scan picks.
                 if val > best_val {
                     best_val = val;
                     best_idx = rr;
@@ -375,6 +346,7 @@ impl Head {
             }
             r += 2;
         }
+        // An odd row count leaves one row over.
         for r in r..r1 {
             // Two codes per byte, unpacked in the loop instead of at boot.
             // `llm_core::dot_int4_int8` is asserted bit-for-bit equal to the

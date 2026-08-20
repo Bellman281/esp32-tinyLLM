@@ -85,6 +85,7 @@ a firmware that is fast because it computes something else is not a result.
 | **Rust, --fast-mspi** ‡ | 3.8 | 24.7 | 6.0 | 7.3 | 60.9 | 102.7 | **102.6** | 9.75 |
 | **+ i16 activations** | 3.9 | 26.8 | 6.2 | 7.7 | 55.3 | 99.9 | **100.0** | 10.00 |
 | **Rust, now** | 4.0 | 27.1 | 6.5 | 7.9 | 49.7 | 95.2 | **95.2** | 10.50 |
+| **+ four rows per pass** ‡ | 3.9 | 27.0 | 6.1 | 7.4 | 52.8 | 97.2 | **97.1** | 10.30 |
 | ratio vs C reference | 0.91x | 0.63x | 0.94x | 0.93x | 0.87x | 0.79x | **0.78x** | |
 | absolute gap | -0.4 | -15.8 | -0.4 | -0.6 | -7.4 | -24.6 | **-26.8** | |
 | **change this brought** | +0.1 | +0.3 | +0.3 | +0.2 | -5.6 | -4.7 | **-4.8** | |
@@ -93,6 +94,7 @@ a firmware that is fast because it computes something else is not a result.
 ‡ **+ int8 head (reverted) is not the shipping configuration** and is excluded from the ratios and the summary below. A negative result, kept because it corrects a claim this file made. Staging the head as unpacked int8 instead of packed int4 -- the C reference's format, and one fewer operation per element -- made the head 62.3 -> 76.9 ms and the token 106.3 -> 121.5. Reverted. Bit-exact throughout: the digest still printed OK, so this is purely a cost.
 ‡ **+ probe, always on is not the shipping configuration** and is excluded from the ratios and the summary below. Superseded by [run.rust-findings-off]. Kept because it is the measurement that justified making the probe opt-in: identical arithmetic, 0.3 ms slower, purely from ~50 lines sitting in head.rs.
 ‡ **Rust, --fast-mspi is not the shipping configuration** and is excluded from the ratios and the summary below. One flag from the default build -- scripts/run_device.sh --fast-mspi -- and not the default, for reasons about other boards rather than this one: CONFIG_IDF_EXPERIMENTAL_FEATURES, Espressif documenting 120 MHz as temperature-sensitive, and this board's boya flash part refusing it and falling back. Bit-exact: 102.6 ms/token, 9.75 tok/s, 18.9% faster than the C reference, digest 0x327578cb136fd6aa OK.
+‡ **+ four rows per pass is not the shipping configuration** and is excluded from the ratios and the summary below. A negative result, and a predicted one. Two rows per pass took the head's activation loads to 0.5 per multiply-accumulate; four would take them to 0.25, and on an issue-bound loop that should be the whole win. It is not: four rows need four lane sets, and at DOT_LANES = 4 that is sixteen live accumulators on a machine with sixteen visible address registers. The allocator spilled. Head 49.3 -> 52.8 ms and the token 93.7 -> 97.1, measured in the probe build against the probe build; cycles/MAC went the wrong way, 8.13 -> 8.41, which is the spill showing up directly. Reverted. Bit-exact throughout -- the digest still printed OK -- so this is purely a cost. The arithmetic is kept in llm_core::dot4_int4_int16, tested, off the hot path.
 
 **`attn` broken down** — the sub-stages the five-stage profile hides. `qkv`/`proj` are the fp32 matvec that also drives `ffn` and `ple`; `core` is attention proper, the only part that grows with sequence position. The C reference has no equivalent instrumentation, so it is absent rather than zero.
 
@@ -108,6 +110,7 @@ a firmware that is fast because it computes something else is not a result.
 | **Rust, --fast-mspi** | 7.5 | 0.15 | 14.5 | 2.6 | 24.8 | `qkv`, `proj`, `core` |
 | **+ i16 activations** | 7.9 | 0.15 | 16.0 | 2.7 | 26.8 | `qkv`, `proj`, `core` |
 | **Rust, now** | 8.2 | 0.15 | 15.8 | 2.9 | 27.0 | `qkv`, `proj`, `core` |
+| **+ four rows per pass** | 7.7 | 0.15 | 16.5 | 2.7 | 27.1 | `qkv`, `proj`, `core` |
 
 **Rust is 28.2% faster per token than the C reference it was ported from** — 95.2 ms against 122.0, 10.50 tok/s against 8.20, on the same board with byte-identical output. It beats C on 5 of the 5 stages.
 

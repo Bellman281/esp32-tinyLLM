@@ -684,12 +684,21 @@ pub fn dot_int4_int16(row_codes: &[u8], actq: &[i16], act_sum: i32) -> i32 {
 ///   mull + add       16          16          16
 /// ```
 ///
-/// WHY THIS MIGHT NOT PAY, and why it is worth trying anyway: four rows need
-/// four lane sets, and at `DOT_LANES = 4` that is sixteen live accumulators on
-/// a machine with sixteen visible address registers. If the register allocator
-/// spills, the loads it adds will cost more than the loads this removes. That
-/// is exactly the sort of thing `scripts/disasm_head.sh` answers in one look,
-/// and the stopwatch confirms — it is cheap to try and cheap to abandon.
+/// IT DID NOT PAY. **This function is not on the firmware's hot path, and
+/// should not be put back on it without re-measuring.** The risk written here
+/// before the measurement was that four rows need four lane sets, and at
+/// `DOT_LANES = 4` that is sixteen live accumulators on a machine with sixteen
+/// visible address registers — so the allocator would spill and the loads it
+/// added would cost more than the loads this removes. That is what happened.
+/// Wiring `head.rs` to this function moved the head **49.3 -> 52.8 ms** and the
+/// token 93.7 -> 97.1, and the probe's cycles/MAC went the wrong way,
+/// **8.13 -> 8.41**. Reverted at 9e0957c's two-row loop.
+///
+/// It is kept, tested and exported because the arithmetic is right and the
+/// register budget is the only thing wrong with it: `DOT_LANES = 2` with four
+/// rows is eight accumulators for the same 0.25 loads/MAC, and that variant is
+/// worth a measurement someday. Deleting the function would delete the
+/// evidence of where the wall is.
 ///
 /// BIT-EXACT, for the same reason `dot2_int4_int16` is: the four rows share
 /// loads and nothing else. Same terms, same order, same lanes, same hoisted
