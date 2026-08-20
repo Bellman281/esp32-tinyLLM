@@ -1,8 +1,38 @@
+# What GitHub's language bar should say about this repo.
+#
+# This is a Rust inference engine. Everything below is either code someone
+# else wrote (kept here for provenance or for parity checking) or tooling
+# that measures and demonstrates the engine rather than being part of it.
+# Neither should push the bar away from the thing the repo actually is.
+#
+# The distinction between the two markers matters and is not cosmetic:
+# `linguist-vendored` asserts "not authored here", and claiming that about
+# our own scripts would be false. `linguist-detectable=false` says only
+# "don't count this", which is what we mean about our own tooling.
+
+# ---- Not authored here -------------------------------------------------
 # reference-c/ is a verbatim, frozen mirror of the upstream C/C++/Arduino
-# repo (slvDev/esp32-ai) kept here only so the Rust port can be checked
-# against it -- it is not code written in this repo. Exclude it (and the
-# other reference/data copies) from GitHub's language stats so the bar
-# reflects what's actually being authored here.
+# repo (slvDev/esp32-ai), kept so the Rust port can be checked against it.
 reference-c/** linguist-vendored
+# training/ is the upstream Python pipeline that produces model.bin, copied
+# byte-identical from the same project at 97018d5 and refreshed wholesale
+# rather than patched -- see training/README.md, whose local-changes table
+# is empty by design.
+training/** linguist-vendored
+# Weights, tokenizer data, and the exported vocab table.
 model/** linguist-vendored
 demo/bpe32768.json linguist-vendored
+
+# ---- Authored here, but not the engine ---------------------------------
+# scripts/ is the measurement harness: flash-and-log, disassembly dumps, the
+# host benchmark, and the plotter that generates every figure in README.md
+# and BENCHMARKING.md from benchmarks/device.toml. Real work, and the reason
+# the numbers in this repo can be trusted -- but it is instrumentation, not
+# the inference engine, and 388 lines of matplotlib should not read as what
+# this project is written in.
+scripts/*.py linguist-detectable=false
+scripts/*.sh linguist-detectable=false
+# demo/ is two small CLI clients (one Python, one driving the Rust binary)
+# plus their runner, for showing the model working.
+demo/*.py linguist-detectable=false
+demo/*.sh linguist-detectable=false

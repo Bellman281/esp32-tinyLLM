@@ -82,19 +82,21 @@ a firmware that is fast because it computes something else is not a result.
 | **+ int8 head (reverted)** ‡ | 4.0 | 26.8 | 6.2 | 7.6 | 76.9 | 121.5 | **121.6** | 8.23 |
 | **+ probe, always on** ‡ | 3.8 | 26.2 | 6.0 | 7.3 | 63.2 | 106.5 | **106.6** | 9.38 |
 | **+ probe opt-in** | 3.9 | 26.3 | 6.2 | 7.6 | 62.2 | 106.2 | **106.3** | 9.41 |
-| **Rust, --fast-mspi** ‡ | 3.8 | 24.7 | 6.0 | 7.3 | 60.9 | 102.7 | **102.6** | 9.75 |
+| **Rust, --fast-mspi (pre-i16)** ‡ | 3.8 | 24.7 | 6.0 | 7.3 | 60.9 | 102.7 | **102.6** | 9.75 |
 | **+ i16 activations** | 3.9 | 26.8 | 6.2 | 7.7 | 55.3 | 99.9 | **100.0** | 10.00 |
 | **Rust, now** | 4.0 | 27.1 | 6.5 | 7.9 | 49.7 | 95.2 | **95.2** | 10.50 |
 | **+ four rows per pass** ‡ | 3.9 | 27.0 | 6.1 | 7.4 | 52.8 | 97.2 | **97.1** | 10.30 |
+| **Rust, --fast-mspi** ‡ | 3.9 | 25.6 | 6.3 | 7.7 | 48.2 | 91.7 | **91.8** | 10.89 |
 | ratio vs C reference | 0.91x | 0.63x | 0.94x | 0.93x | 0.87x | 0.79x | **0.78x** | |
 | absolute gap | -0.4 | -15.8 | -0.4 | -0.6 | -7.4 | -24.6 | **-26.8** | |
 | **change this brought** | +0.1 | +0.3 | +0.3 | +0.2 | -5.6 | -4.7 | **-4.8** | |
 
-‡ **+ MSPI bus 120 MHz is not the shipping configuration** and is excluded from the ratios and the summary below. Requires CONFIG_IDF_EXPERIMENTAL_FEATURES; Espressif documents 120 MHz as temperature-sensitive and not recommended across the industrial range, and this board's boya flash part refused it and fell back. Real, reproducible, bit-exact -- and not what you get by cloning this repo. Available as a +3.3% opt-in; see BENCHMARKING.md.
+‡ **+ MSPI bus 120 MHz is not the shipping configuration** and is excluded from the ratios and the summary below. Requires CONFIG_IDF_EXPERIMENTAL_FEATURES; Espressif documents 120 MHz as temperature-sensitive and not recommended across the industrial range, and this board's boya flash part refused it and fell back. Real, reproducible, bit-exact -- and not what you get by cloning this repo. It was a +3.3% opt-in AT THE TIME; the engine has moved twice since, and [run.rust-fast-mspi-dot2] is the current measurement of the same flag.
 ‡ **+ int8 head (reverted) is not the shipping configuration** and is excluded from the ratios and the summary below. A negative result, kept because it corrects a claim this file made. Staging the head as unpacked int8 instead of packed int4 -- the C reference's format, and one fewer operation per element -- made the head 62.3 -> 76.9 ms and the token 106.3 -> 121.5. Reverted. Bit-exact throughout: the digest still printed OK, so this is purely a cost.
 ‡ **+ probe, always on is not the shipping configuration** and is excluded from the ratios and the summary below. Superseded by [run.rust-findings-off]. Kept because it is the measurement that justified making the probe opt-in: identical arithmetic, 0.3 ms slower, purely from ~50 lines sitting in head.rs.
-‡ **Rust, --fast-mspi is not the shipping configuration** and is excluded from the ratios and the summary below. One flag from the default build -- scripts/run_device.sh --fast-mspi -- and not the default, for reasons about other boards rather than this one: CONFIG_IDF_EXPERIMENTAL_FEATURES, Espressif documenting 120 MHz as temperature-sensitive, and this board's boya flash part refusing it and falling back. Bit-exact: 102.6 ms/token, 9.75 tok/s, 18.9% faster than the C reference, digest 0x327578cb136fd6aa OK.
+‡ **Rust, --fast-mspi (pre-i16) is not the shipping configuration** and is excluded from the ratios and the summary below. One flag from the default build -- scripts/run_device.sh --fast-mspi -- and not the default, for reasons about other boards rather than this one: CONFIG_IDF_EXPERIMENTAL_FEATURES, Espressif documenting 120 MHz as temperature-sensitive, and this board's boya flash part refusing it and falling back. Bit-exact: 102.6 ms/token, 9.75 tok/s, 18.9% faster than the C reference, digest 0x327578cb136fd6aa OK. SUPERSEDED as a description of the flag -- this was measured before i16 activations and two rows per pass, so it now reads slower than the shipping default. See [run.rust-fast-mspi-dot2] for the same flag on the current engine.
 ‡ **+ four rows per pass is not the shipping configuration** and is excluded from the ratios and the summary below. A negative result, and a predicted one. Two rows per pass took the head's activation loads to 0.5 per multiply-accumulate; four would take them to 0.25, and on an issue-bound loop that should be the whole win. It is not: four rows need four lane sets, and at DOT_LANES = 4 that is sixteen live accumulators on a machine with sixteen visible address registers. The allocator spilled. Head 49.3 -> 52.8 ms and the token 93.7 -> 97.1, measured in the probe build against the probe build; cycles/MAC went the wrong way, 8.13 -> 8.41, which is the spill showing up directly. Reverted. Bit-exact throughout -- the digest still printed OK -- so this is purely a cost. The arithmetic is kept in llm_core::dot4_int4_int16, tested, off the hot path.
+‡ **Rust, --fast-mspi is not the shipping configuration** and is excluded from the ratios and the summary below. The opt-in 120 MHz MSPI clock, re-measured on the current engine -- the earlier [run.rust-fast-mspi] row was taken before i16 activations and two rows per pass, and had gone stale enough to read as a downgrade. 91.8 ms/token, 10.89 tok/s: 3.6% under the shipping default's 95.2 and 24.8% under the C reference. The two effects compose, which is what you would expect of a memory-side change against two instruction-side ones -- the bus went 68 -> 75 MB/s on the probe and the head, which is compute-bound, moved only 49.7 -> 48.2 while attn (the stage that actually streams) took 27.1 -> 25.6. Still not the default: it needs CONFIG_IDF_EXPERIMENTAL_FEATURES, Espressif documents 120 MHz as temperature-sensitive outside the commercial range, and this board's boya flash part logs 'High performance mode of this flash model hasn't been supported' and stays at its own clock while PSRAM alone goes to 120. Bit-exact: digest 0x327578cb136fd6aa OK.
 
 **`attn` broken down** — the sub-stages the five-stage profile hides. `qkv`/`proj` are the fp32 matvec that also drives `ffn` and `ple`; `core` is attention proper, the only part that grows with sequence position. The C reference has no equivalent instrumentation, so it is absent rather than zero.
 
@@ -107,10 +109,11 @@ a firmware that is fast because it computes something else is not a result.
 | **+ int8 head (reverted)** | 7.9 | 0.15 | 16.0 | 2.7 | 26.8 | `qkv`, `proj`, `core` |
 | **+ probe, always on** | 7.6 | 0.15 | 15.9 | 2.6 | 26.2 | `qkv`, `proj`, `core` |
 | **+ probe opt-in** | 7.8 | 0.15 | 15.6 | 2.7 | 26.2 | `qkv`, `proj`, `core` |
-| **Rust, --fast-mspi** | 7.5 | 0.15 | 14.5 | 2.6 | 24.8 | `qkv`, `proj`, `core` |
+| **Rust, --fast-mspi (pre-i16)** | 7.5 | 0.15 | 14.5 | 2.6 | 24.8 | `qkv`, `proj`, `core` |
 | **+ i16 activations** | 7.9 | 0.15 | 16.0 | 2.7 | 26.8 | `qkv`, `proj`, `core` |
 | **Rust, now** | 8.2 | 0.15 | 15.8 | 2.9 | 27.0 | `qkv`, `proj`, `core` |
 | **+ four rows per pass** | 7.7 | 0.15 | 16.5 | 2.7 | 27.1 | `qkv`, `proj`, `core` |
+| **Rust, --fast-mspi** | 8.0 | 0.15 | 14.8 | 2.8 | 25.8 | `qkv`, `proj`, `core` |
 
 **Rust is 28.2% faster per token than the C reference it was ported from** — 95.2 ms against 122.0, 10.50 tok/s against 8.20, on the same board with byte-identical output. It beats C on 5 of the 5 stages.
 
