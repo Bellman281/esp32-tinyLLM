@@ -44,7 +44,7 @@
 use core::cell::{Cell, UnsafeCell};
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use esp_idf_svc::hal::cpu::Core;
-use esp_idf_svc::hal::sys::{TaskHandle_t, TickType_t};
+use esp_idf_svc::hal::sys::{esp_timer_get_time, TaskHandle_t, TickType_t};
 use esp_idf_svc::hal::task;
 use llm_core::{dot_int4_int8, quantize_activations, QT};
 
@@ -90,6 +90,23 @@ pub struct Head {
 
     worker: Cell<TaskHandle_t>, // set once, right after task::create succeeds
     inference_task: TaskHandle_t, // set once at construction, never changes
+
+    // Sub-stage timing. The five-stage profile in llm-core reports the head as
+    // one number, which was enough to see it dominate and not enough to see
+    // WHY -- staging the weights as int4 halved what it streams and moved that
+    // number by 0.0 ms, which no coarser instrument could explain. These split
+    // it four ways.
+    //
+    // `Cell`, not an atomic: `own`/`quant`/`wait` are written only by the
+    // inference core inside `matvec`, and `worker` only by the worker task
+    // inside `head_worker_main`. Neither is read until generation has finished
+    // and both tasks are quiescent. Same single-writer reasoning as the
+    // `worker` handle above.
+    prof_quant_us: Cell<u64>,  // quantizing the activation
+    prof_own_us: Cell<u64>,    // this core's row range
+    prof_wait_us: Cell<u64>,   // blocked on the worker after finishing ours
+    prof_worker_us: Cell<u64>, // the worker's row range, timed on the worker
+    prof_calls: Cell<u32>,
 }
 
 impl Head {
@@ -152,6 +169,7 @@ impl Head {
     pub fn matvec(&self, x: &[f32], y: &mut [f32]) {
         debug_assert!(x.len() >= self.cols);
         debug_assert!(y.len() >= self.rows);
+        let t0 = unsafe { esp_timer_get_time() };
 
         // SAFETY: this function only ever runs on the inference core
         // (never concurrently with itself -- `llm_forward` is called in a
@@ -168,6 +186,8 @@ impl Head {
         // the worker index through raw pointers into the same allocation,
         // on disjoint ranges -- never through a typed `&mut [f32]` again
         // (see module doc comment).
+        let t1 = unsafe { esp_timer_get_time() };
+
         let y_ptr = y.as_mut_ptr();
         let split = self.rows / 2;
         self.job_split.store(split, Ordering::Relaxed);
@@ -183,12 +203,67 @@ impl Head {
         // writes [0, split) (see `head_worker_main`). Disjoint index
         // ranges of the same buffer, concurrently, by construction.
         unsafe { self.rows_range(y_ptr, split, self.rows) };
+        let t2 = unsafe { esp_timer_get_time() };
 
         // Blocks until `head_worker_main`'s `task::notify` (its half is
         // done). `TickType_t::MAX` is this port's equivalent of C's
         // `portMAX_DELAY` (wait forever) -- see this module's README
         // entry for the verification caveat on that mapping.
         let _ = task::wait_notification(TickType_t::MAX);
+        let t3 = unsafe { esp_timer_get_time() };
+
+        self.prof_quant_us.set(self.prof_quant_us.get() + (t1 - t0) as u64);
+        self.prof_own_us.set(self.prof_own_us.get() + (t2 - t1) as u64);
+        self.prof_wait_us.set(self.prof_wait_us.get() + (t3 - t2) as u64);
+        self.prof_calls.set(self.prof_calls.get() + 1);
+    }
+
+    /// Zero the sub-stage counters. Called after prompt priming, for the same
+    /// reason `llm_core::Profile::reset` is: priming decodes with a
+    /// differently-shaped KV cache and would skew the averages.
+    pub fn profile_reset(&self) {
+        self.prof_quant_us.set(0);
+        self.prof_own_us.set(0);
+        self.prof_wait_us.set(0);
+        self.prof_worker_us.set(0);
+        self.prof_calls.set(0);
+    }
+
+    /// `[quantize, own half, wait for worker, worker half]` in ms/token, or
+    /// `None` before any timed call.
+    ///
+    /// How to read it:
+    /// - `own + wait` should account for essentially all of the head stage.
+    /// - `wait` near zero means this core is the slow half and the split is
+    ///   fine. `wait` large means the worker's half takes materially longer
+    ///   than ours, and moving `split` off `rows / 2` is free throughput --
+    ///   core 0 also services interrupts, so an even row split is not
+    ///   necessarily an even time split.
+    /// - `worker` is that half measured on the worker itself, so
+    ///   `wait ~= worker - own` when the worker is slower. A `wait` much
+    ///   larger than `worker - own` is scheduling latency, not compute.
+    /// - `quant` should be negligible (96 elements); if it is not, something
+    ///   is wrong with the activation path rather than the matvec.
+    pub fn profile_ms_per_token(&self) -> Option<[f32; 4]> {
+        let n = self.prof_calls.get();
+        if n == 0 {
+            return None;
+        }
+        let d = n as f32 * 1000.0;
+        Some([
+            self.prof_quant_us.get() as f32 / d,
+            self.prof_own_us.get() as f32 / d,
+            self.prof_wait_us.get() as f32 / d,
+            self.prof_worker_us.get() as f32 / d,
+        ])
+    }
+
+    /// Measure sequential read bandwidth over this head's own staged weights,
+    /// returning `(bytes, MB/s)`. Uses the real buffer rather than a synthetic
+    /// one so the number is directly comparable to what the head streams per
+    /// token -- same allocation, same size, same direction.
+    pub fn probe_weight_bandwidth(&self) -> (usize, f64) {
+        (self.w4.len(), psram::probe_read_bandwidth(self.w4))
     }
 
     /// The staged row count (== `vocab_n` passed to `stage_and_spawn`).
@@ -226,7 +301,12 @@ extern "C" fn head_worker_main(arg: *mut core::ffi::c_void) {
         // SAFETY: rows [0, split) belong exclusively to this call until
         // the notify below -- `Head::matvec`, which set up this job, only
         // ever writes [split, rows) itself (see its doc comment).
+        let w0 = unsafe { esp_timer_get_time() };
         unsafe { head.rows_range(y_ptr, 0, split) };
+        let w1 = unsafe { esp_timer_get_time() };
+        // Only this task writes this counter; see the field's doc comment.
+        head.prof_worker_us
+            .set(head.prof_worker_us.get() + (w1 - w0) as u64);
         let _ = unsafe { task::notify(head.inference_task, NOTIFY) };
     }
 }
@@ -290,6 +370,11 @@ pub fn stage_and_spawn(tok_emb: QT<'static>, vocab_n: usize) -> Result<&'static 
         job_split: AtomicUsize::new(0),
         worker: Cell::new(core::ptr::null_mut()),
         inference_task,
+        prof_quant_us: Cell::new(0),
+        prof_own_us: Cell::new(0),
+        prof_wait_us: Cell::new(0),
+        prof_worker_us: Cell::new(0),
+        prof_calls: Cell::new(0),
     }));
 
     // SAFETY: `head_worker_main` is a valid `extern "C" fn(*mut c_void)`;

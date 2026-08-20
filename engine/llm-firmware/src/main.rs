@@ -290,7 +290,27 @@ fn main() {
     };
 
     let mut scratch = psram::alloc_scratch_psram(&model.cfg);
-    println!("PSRAM free after alloc: {} KB\n", psram::free_psram_bytes() / 1024);
+    println!("PSRAM free after alloc: {} KB", psram::free_psram_bytes() / 1024);
+
+    // One cold sequential pass over the staged head weights -- the same buffer,
+    // direction and access pattern the head uses every token, and far larger
+    // than the data cache, so nothing is reused. This is the minimum useful
+    // part of reference-c/firmware/bandwidth_bench/ and it converts "the head
+    // is probably memory-bound" into a bound: at `bw` MB/s, streaming `n` MB
+    // per token cannot cost less than 1000*n/bw ms, and whatever the head
+    // spends above that is arithmetic that shrinking the weights will never
+    // reach. Staging the head as int4 halved `n` and moved the head by 0.0 ms,
+    // which is the observation this line exists to explain.
+    {
+        let (bytes, bw) = head.probe_weight_bandwidth();
+        println!(
+            "PSRAM read: {:.0} MB/s  ({:.2} MB of head weights => {:.1} ms/token floor)",
+            bw,
+            bytes as f64 / 1e6,
+            bytes as f64 / bw / 1000.0
+        );
+    }
+    println!();
     let _ = std::io::stdout().flush();
 
     // The override closure IS `Model.head_matvec` from the C reference --
@@ -338,6 +358,7 @@ fn main() {
     // cache is empty/growing in a way steady-state decode isn't, so C
     // deliberately excludes it from the averaged breakdown too.
     let mut prof = Profile::default();
+    head.profile_reset(); // same boundary, same reason -- exclude priming
     let t_start = unsafe { esp_timer_get_time() };
     let mut decode_us: i64 = 0;
     let mut decoded = 0usize;
@@ -400,6 +421,14 @@ fn main() {
     if let Some([input, attn, ffn, ple, head]) = prof.ms_per_token() {
         println!(
             "profile ms/token: input {input:.1} | attn {attn:.1} | ffn {ffn:.1} | ple {ple:.1} | head {head:.1}"
+        );
+    }
+    // The head is ~55% of a token and ~73% of the gap to C, so it gets its own
+    // breakdown. `own + wait` should account for nearly all of the `head`
+    // figure above; see Head::profile_ms_per_token for how to read the rest.
+    if let Some([quant, own, wait, worker]) = head.profile_ms_per_token() {
+        println!(
+            "  head detail:    quant {quant:.2} | own-half {own:.1} | wait-worker {wait:.1} | worker-half {worker:.1}"
         );
     }
     let _ = std::io::stdout().flush();

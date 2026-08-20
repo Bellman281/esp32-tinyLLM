@@ -20,7 +20,9 @@
 //! pass over a few MB at boot (once, not per-token) and removes any need
 //! to reason about it here.
 
-use esp_idf_svc::hal::sys::{heap_caps_get_free_size, heap_caps_malloc, MALLOC_CAP_SPIRAM};
+use esp_idf_svc::hal::sys::{
+    esp_timer_get_time, heap_caps_get_free_size, heap_caps_malloc, MALLOC_CAP_SPIRAM,
+};
 use llm_core::{Cfg, Scratch};
 
 /// Ports `ps()`: PSRAM-malloc `n` bytes or halt. The C reference prints and
@@ -112,4 +114,43 @@ pub fn free_psram_bytes() -> usize {
     // SAFETY: no arguments beyond the capability mask, no preconditions
     // beyond the heap being initialized (true by the time `main` runs).
     unsafe { heap_caps_get_free_size(MALLOC_CAP_SPIRAM) as usize }
+}
+
+/// Sequential read bandwidth of `buf`, in MB/s, measured by streaming it once.
+///
+/// The minimum useful piece of `reference-c/firmware/bandwidth_bench/` (Phase 5,
+/// still unported): enough to turn "the head is probably memory-bound" into a
+/// number. Point it at the staged head weights and the answer is directly
+/// comparable to what the head does per token -- same buffer, same direction,
+/// same cold-stream access pattern, nothing cached between passes because it is
+/// far larger than the data cache.
+///
+/// Read it as an upper bound on how much of the head's time is memory. If the
+/// head streams `n` MB per token and this reports `b` MB/s, then at least
+/// `head_ms - 1000*n/b` is arithmetic, and no amount of shrinking the weights
+/// can touch it. That bound is what tells you whether to spend the next effort
+/// on bytes or on instructions.
+///
+/// Accumulates rather than using `read_volatile` per word: a volatile load per
+/// `u32` blocks the unrolling and pipelining the real head loop gets, and would
+/// understate bandwidth. `black_box` on the result is what stops the loop being
+/// deleted.
+pub fn probe_read_bandwidth(buf: &[u8]) -> f64 {
+    let words = buf.len() / 4;
+    let p = buf.as_ptr() as *const u32;
+    let t0 = unsafe { esp_timer_get_time() };
+    let mut acc: u32 = 0;
+    for i in 0..words {
+        // SAFETY: `i < words == buf.len()/4`, and `buf` is at least
+        // `words * 4` bytes, so every read is inside it. u32 has no
+        // alignment requirement this allocator can violate -- PSRAM
+        // allocations are at least word-aligned.
+        acc = acc.wrapping_add(unsafe { *p.add(i) });
+    }
+    let dt = unsafe { esp_timer_get_time() } - t0;
+    core::hint::black_box(acc);
+    if dt <= 0 {
+        return f64::NAN;
+    }
+    (words * 4) as f64 / dt as f64
 }
