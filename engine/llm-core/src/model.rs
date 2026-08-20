@@ -483,8 +483,25 @@ fn llm_forward_impl(
         let layer = model.layer(l);
 
         // ---- attention
+        //
+        // Split four ways when profiling. `attn` is a third of a token and was
+        // the last stage reported as one number; the four parts have different
+        // levers (see `Profile::attn_detail_ms_per_token`), and guessing which
+        // one dominates is exactly what cost flashes on the head. Each `sub`
+        // below reads the clock only when a `Profile` was supplied.
+        let mut sub_t = last_t;
+        macro_rules! sub {
+            ($field:ident) => {
+                if let Some((now, p)) = prof.as_mut() {
+                    let t = now();
+                    p.$field += t - sub_t;
+                    sub_t = t;
+                }
+            };
+        }
         ops::rmsnorm(s.x, layer.attn_norm, d, s.h);
         dispatch_matvec(&mut matvec_override, &layer.qkv, s.h, &mut s.qkv[..3 * d], s.iq);
+        sub!(attn_qkv_us);
         {
             let (q, rest) = s.qkv[..3 * d].split_at_mut(d);
             let (k, v) = rest.split_at_mut(d);
@@ -492,6 +509,7 @@ fn llm_forward_impl(
                 rope::apply(&mut q[hh * dh..hh * dh + dh], s.rope_cos, s.rope_sin, dh);
                 rope::apply(&mut k[hh * dh..hh * dh + dh], s.rope_cos, s.rope_sin, dh);
             }
+            sub!(attn_rope_us);
             let seq = cfg.seq_len;
             let layer_kc = &mut s.kcache[l * seq * d..(l + 1) * seq * d];
             let layer_vc = &mut s.vcache[l * seq * d..(l + 1) * seq * d];
@@ -499,10 +517,16 @@ fn llm_forward_impl(
                 q, k, v, layer_kc, layer_vc, s.att, s.scores, pos, d, h_heads, dh, seq,
             );
         }
+        sub!(attn_core_us);
         dispatch_matvec(&mut matvec_override, &layer.attn_proj, s.att, s.h, s.iq);
         for i in 0..d {
             s.x[i] += s.h[i];
         }
+        sub!(attn_proj_us);
+        // The last `sub!` advances `sub_t` and nothing reads it afterwards.
+        // Consuming it here is cheaper than an `#[allow]`, which would have to
+        // sit on the macro expansion rather than the binding to take effect.
+        let _ = sub_t;
 
         if let Some((now, p)) = prof.as_mut() {
             let t = now();

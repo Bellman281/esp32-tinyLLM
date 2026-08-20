@@ -445,8 +445,16 @@ fn main() {
             "profile ms/token: input {input:.1} | attn {attn:.1} | ffn {ffn:.1} | ple {ple:.1} | head {head:.1}"
         );
     }
-    // The head is ~55% of a token and ~73% of the gap to C, so it gets its own
-    // breakdown. `own + wait` should account for nearly all of the `head`
+    // attn is a third of a token and was the last stage reported as one
+    // number. qkv/proj are the same fp32 matvec that drives ffn and ple; core
+    // is the attention proper and the only part that grows with sequence
+    // length, since it scans the KV cache for every position so far.
+    if let Some([qkv, rope, core, proj]) = prof.attn_detail_ms_per_token() {
+        println!(
+            "  attn detail:    qkv {qkv:.1} | rope {rope:.2} | core {core:.1} | proj {proj:.1}"
+        );
+    }
+    // The head is ~52% of a token, so it gets its own breakdown. `own + wait` should account for nearly all of the `head`
     // figure above; see Head::profile_ms_per_token for how to read the rest.
     if let Some([quant, own, wait, worker]) = head.profile_ms_per_token() {
         println!(
