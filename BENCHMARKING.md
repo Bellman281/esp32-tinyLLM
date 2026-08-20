@@ -29,20 +29,21 @@ either firmware drifts from them.
 
 <!-- BEGIN device-table (generated: scripts/plot_stages.py --inject) -->
 
-| ms/token | input | attn | ffn | ple | head | total | tok/s |
-|---|---|---|---|---|---|---|---|
-| **C reference** | 4.4 | 42.9 | 6.9 | 8.5 | 57.1 | **119.8** | 8.20 |
-| **Rust, before** | 7.8 | 54.4 | 11.9 | 15.2 | 94.6 | **183.9** | 5.34 |
-| **Rust, nibble LUT** | 6.6 | 50.8 | 10.1 | 12.7 | 98.0 | **178.2** | 5.51 |
-| **Rust, + KV layout** | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | **171.2** | 5.73 |
-| **+ int4 head** | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | **171.2** | 5.73 |
-| **+ 4 accumulators** | 6.6 | 47.0 | 10.1 | 12.7 | 81.3 | **157.7** | 6.21 |
-| **+ bias hoist** | 6.6 | 47.0 | 10.1 | 12.7 | 61.5 | **137.9** | 7.09 |
-| **+ dual-core matvec** | 3.9 | 40.2 | 6.2 | 7.5 | 61.6 | **119.4** | 8.15 |
-| **Rust, now** | 3.8 | 39.8 | 6.0 | 7.3 | 61.5 | **118.4** | 8.25 |
-| ratio vs C reference | 0.86x | 0.93x | 0.87x | 0.86x | 1.08x | **0.99x** | |
-| absolute gap | -0.6 | -3.1 | -0.9 | -1.2 | +4.4 | -1.4 | |
-| **change this brought** | -0.1 | -0.4 | -0.2 | -0.2 | -0.1 | **-1.0** | |
+| ms/token | input | attn | ffn | ple | head | stages | **wall** | tok/s |
+|---|---|---|---|---|---|---|---|---|
+| **C reference** | 4.4 | 42.9 | 6.9 | 8.5 | 57.1 | 119.8 | **122.0** | 8.20 |
+| **Rust, before** | 7.8 | 54.4 | 11.9 | 15.2 | 94.6 | 183.9 | **187.2** | 5.34 |
+| **Rust, nibble LUT** | 6.6 | 50.8 | 10.1 | 12.7 | 98.0 | 178.2 | **181.6** | 5.51 |
+| **Rust, + KV layout** | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | 171.2 | **174.6** | 5.73 |
+| **+ int4 head** | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | 171.2 | **174.6** | 5.73 |
+| **+ 4 accumulators** | 6.6 | 47.0 | 10.1 | 12.7 | 81.3 | 157.7 | **161.0** | 6.21 |
+| **+ bias hoist** | 6.6 | 47.0 | 10.1 | 12.7 | 61.5 | 137.9 | **140.9** | 7.09 |
+| **+ dual-core matvec** | 3.9 | 40.2 | 6.2 | 7.5 | 61.6 | 119.4 | **122.7** | 8.15 |
+| **+ argmax/stdout** | 3.8 | 39.8 | 6.0 | 7.3 | 61.5 | 118.4 | **121.1** | 8.25 |
+| **Rust, now** | 3.9 | 40.0 | 6.1 | 7.5 | 61.5 | 119.0 | **119.0** | 8.40 |
+| ratio vs C reference | 0.89x | 0.93x | 0.88x | 0.88x | 1.08x | 0.99x | **0.98x** | |
+| absolute gap | -0.5 | -2.9 | -0.8 | -1.0 | +4.4 | -0.8 | **-3.0** | |
+| **change this brought** | +0.1 | +0.2 | +0.1 | +0.2 | +0.0 | +0.6 | **-2.1** | |
 
 <!-- END device-table -->
 
@@ -81,23 +82,32 @@ different allocators, same model).
 
 ## Where the time goes now
 
-Every stage except the head is faster than C, and the head is 1.08x. What is
-left is not in the profiled stages at all:
+Every stage except the head is faster than C, and the head is 1.08x. Outside
+the profiled stages there is now essentially nothing:
 
 ```
-outside stages: argmax 2.74 | emit 0.03 | other 0.00 ms/token  (wall 121.1 vs forward 118.4)
+outside stages: argmax 0.00 | emit 0.03 | other 0.00 ms/token  (wall 119.0 vs forward 119.0)
 ```
 
-The greedy argmax reads 25,353 logits back out of PSRAM — 101 KB at roughly
-half the bus rate, because a data-dependent branch per element leaves nothing to
-pipeline. It is 2.3% of a token and the single largest remaining line item.
+It did not start there. It was `argmax 2.74`, and the fix was not a faster
+loop: the greedy pick was reading 25,353 logits back out of PSRAM, 101 KB at
+roughly half the measured bus rate, because a data-dependent branch per element
+leaves nothing to pipeline. Both cores already hold each logit in a register the
+moment `rows_range` computes it, so each now tracks the maximum over its own
+rows and the decode loop chooses between two candidates. Tie-breaking is
+identical — first-strictly-greater within a half, `hi > lo ? hi : lo` between
+halves, which yields the lower index on a tie exactly as a `0..n` scan does.
 
-The fix is not to optimise that loop. Both cores already hold each logit in a
-register the moment `rows_range` computes it; each can track its own running
-argmax over its own row range, leaving a final choice between two candidates and
-no read-back at all. Tie-breaking stays exact — first-strictly-greater within a
-half, and `hi > lo ? hi : lo` between halves, which yields the lower index on a
-tie exactly as a `0..n` scan does.
+**The C reference still pays that cost**: 122.0 ms wall against 119.8 profiled.
+Its `pick()` scans all 25,353 logits too. That 2.2 ms is most of the margin
+between the two engines, and it is the one place this port is not doing the same
+work as its reference — it is doing less of it, for the same output.
+
+What remains, in order of size: `attn` at 40.0 ms is a third of a token and has
+never been instrumented the way the head was; the fp32 `matvec_range` runs at
+~21 cycles/MAC against the head's 12.1 and carries the same single-accumulator
+chain the head shed, though fp32 reordering needs the tolerance
+`matvec_simd_tolerance.rs` has already measured.
 
 ## Instrumentation
 

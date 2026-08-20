@@ -141,7 +141,7 @@ wall_ms = 122.65
 tok_s   = 8.15
 
 [run.rust-final]
-label   = "Rust, now"
+label   = "+ argmax/stdout"
 engine  = "rust"
 date    = "2026-08-20"
 commit  = "perf(firmware): the last mile is outside the profiled stages"
@@ -153,3 +153,17 @@ ple     = 7.3
 head    = 61.5
 wall_ms = 121.1
 tok_s   = 8.25
+
+[run.rust-argmax]
+label   = "Rust, now"
+engine  = "rust"
+date    = "2026-08-20"
+commit  = "perf(head): take the argmax where the logits are made"
+note    = "The greedy pick no longer reads the logits back. Both cores track the maximum over their own rows while computing them, so the decode loop chooses between two candidates instead of scanning 25,353 floats out of PSRAM. Tie-breaking is identical -- strict > within a half keeps the lowest index, and hi > lo between halves resolves a tie to the lower one, which is what a 0..n scan does. Output byte-identical, which is the only available gate: this path is firmware-only and no host test reaches it. argmax 2.74 -> 0.00 ms/token, and wall clock now equals the profiled sum."
+input   = 3.9
+attn    = 40.0
+ffn     = 6.1
+ple     = 7.5
+head    = 61.5
+wall_ms = 119.0
+tok_s   = 8.40

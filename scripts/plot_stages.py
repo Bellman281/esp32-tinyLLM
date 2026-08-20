@@ -195,26 +195,30 @@ def table(doc, runs):
         for st in str(rb.get("provisional_stages", "")).split():
             mark[(id(rb), st)] = " †"
 
-    o = ["| ms/token | " + " | ".join(STAGES) + " | total | tok/s |",
-         "|---" * (len(STAGES) + 3) + "|"]
+    # `stages` is the profiled sum; `wall` is the number a user experiences.
+    # They diverge by whatever sits outside the profiled stages -- 2.2 ms for
+    # the C reference, and 0.03 for Rust since the argmax moved into the head.
+    # Reporting only the sum hid a 2.74 ms win once; it does not any more.
+    o = ["| ms/token | " + " | ".join(STAGES) + " | stages | **wall** | tok/s |",
+         "|---" * (len(STAGES) + 4) + "|"]
     for _, rb in runs:
         cells = [f"{rb[st]:.1f}{mark.get((id(rb), st), '')}" for st in STAGES]
         o.append(f"| **{rb['label']}** | " + " | ".join(cells) +
-                 f" | **{tot(rb):.1f}** | {rb['tok_s']:.2f} |")
+                 f" | {tot(rb):.1f} | **{rb['wall_ms']:.1f}** | {rb['tok_s']:.2f} |")
 
     last = runs[-1][1]
     if len(runs) > 1:
         o.append("| ratio vs " + str(ref["label"]) + " | " +
                  " | ".join(f"{last[st]/ref[st]:.2f}x" for st in STAGES) +
-                 f" | **{tot(last)/tot(ref):.2f}x** | |")
+                 f" | {tot(last)/tot(ref):.2f}x | **{last['wall_ms']/ref['wall_ms']:.2f}x** | |")
         o.append("| absolute gap | " +
                  " | ".join(f"{last[st]-ref[st]:+.1f}" for st in STAGES) +
-                 f" | {tot(last)-tot(ref):+.1f} | |")
+                 f" | {tot(last)-tot(ref):+.1f} | **{last['wall_ms']-ref['wall_ms']:+.1f}** | |")
     if len(runs) > 2:
         prev = runs[-2][1]
         o.append("| **change this brought** | " +
                  " | ".join(f"{last[st]-prev[st]:+.1f}" for st in STAGES) +
-                 f" | **{tot(last)-tot(prev):+.1f}** | |")
+                 f" | {tot(last)-tot(prev):+.1f} | **{last['wall_ms']-prev['wall_ms']:+.1f}** | |")
 
     notes = [rb for _, rb in runs if rb.get("provisional_stages")]
     if notes:

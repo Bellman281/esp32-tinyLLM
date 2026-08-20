@@ -55,20 +55,21 @@ word.
 
 <!-- BEGIN device-table (generated: scripts/plot_stages.py --inject) -->
 
-| ms/token | input | attn | ffn | ple | head | total | tok/s |
-|---|---|---|---|---|---|---|---|
-| **C reference** | 4.4 | 42.9 | 6.9 | 8.5 | 57.1 | **119.8** | 8.20 |
-| **Rust, before** | 7.8 | 54.4 | 11.9 | 15.2 | 94.6 | **183.9** | 5.34 |
-| **Rust, nibble LUT** | 6.6 | 50.8 | 10.1 | 12.7 | 98.0 | **178.2** | 5.51 |
-| **Rust, + KV layout** | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | **171.2** | 5.73 |
-| **+ int4 head** | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | **171.2** | 5.73 |
-| **+ 4 accumulators** | 6.6 | 47.0 | 10.1 | 12.7 | 81.3 | **157.7** | 6.21 |
-| **+ bias hoist** | 6.6 | 47.0 | 10.1 | 12.7 | 61.5 | **137.9** | 7.09 |
-| **+ dual-core matvec** | 3.9 | 40.2 | 6.2 | 7.5 | 61.6 | **119.4** | 8.15 |
-| **Rust, now** | 3.8 | 39.8 | 6.0 | 7.3 | 61.5 | **118.4** | 8.25 |
-| ratio vs C reference | 0.86x | 0.93x | 0.87x | 0.86x | 1.08x | **0.99x** | |
-| absolute gap | -0.6 | -3.1 | -0.9 | -1.2 | +4.4 | -1.4 | |
-| **change this brought** | -0.1 | -0.4 | -0.2 | -0.2 | -0.1 | **-1.0** | |
+| ms/token | input | attn | ffn | ple | head | stages | **wall** | tok/s |
+|---|---|---|---|---|---|---|---|---|
+| **C reference** | 4.4 | 42.9 | 6.9 | 8.5 | 57.1 | 119.8 | **122.0** | 8.20 |
+| **Rust, before** | 7.8 | 54.4 | 11.9 | 15.2 | 94.6 | 183.9 | **187.2** | 5.34 |
+| **Rust, nibble LUT** | 6.6 | 50.8 | 10.1 | 12.7 | 98.0 | 178.2 | **181.6** | 5.51 |
+| **Rust, + KV layout** | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | 171.2 | **174.6** | 5.73 |
+| **+ int4 head** | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | 171.2 | **174.6** | 5.73 |
+| **+ 4 accumulators** | 6.6 | 47.0 | 10.1 | 12.7 | 81.3 | 157.7 | **161.0** | 6.21 |
+| **+ bias hoist** | 6.6 | 47.0 | 10.1 | 12.7 | 61.5 | 137.9 | **140.9** | 7.09 |
+| **+ dual-core matvec** | 3.9 | 40.2 | 6.2 | 7.5 | 61.6 | 119.4 | **122.7** | 8.15 |
+| **+ argmax/stdout** | 3.8 | 39.8 | 6.0 | 7.3 | 61.5 | 118.4 | **121.1** | 8.25 |
+| **Rust, now** | 3.9 | 40.0 | 6.1 | 7.5 | 61.5 | 119.0 | **119.0** | 8.40 |
+| ratio vs C reference | 0.89x | 0.93x | 0.88x | 0.88x | 1.08x | 0.99x | **0.98x** | |
+| absolute gap | -0.5 | -2.9 | -0.8 | -1.0 | +4.4 | -0.8 | **-3.0** | |
+| **change this brought** | +0.1 | +0.2 | +0.1 | +0.2 | +0.0 | +0.6 | **-2.1** | |
 
 <!-- END device-table -->
 
@@ -78,9 +79,13 @@ so a re-measurement updates both at once and they cannot drift apart. Add a run,
 re-run the script; never hand-edit a figure here.
 
 **The Rust engine is now faster than the C implementation it was ported from**, on
-the same board, with byte-identical output: 400 tokens in 48.46 s against C's
-48.78 s, 8.25 tok/s against 8.20. It beats C on four of the five stages; the
-output head is the one still behind, at 1.08x.
+the same board, with byte-identical output: 400 tokens in 47.60 s against C's
+48.78 s, 8.40 tok/s against 8.20 — 2.4% faster per token. It beats C on four of
+the five stages; the output head is the one still behind, at 1.08x.
+
+The `stages` column is the profiled sum and `wall` is what a user experiences.
+They differ by whatever runs outside the profiled stages: 2.2 ms/token for the
+C reference, 0.03 for Rust since the greedy pick moved into the head.
 
 Everything above is measured on hardware and generated from
 [`benchmarks/device.toml`](./benchmarks/device.toml) by `scripts/plot_stages.py`,
