@@ -127,6 +127,23 @@ pub struct Head {
     prof_worker_us: Cell<u64>, // the worker's row range, timed on the worker
     prof_calls: Cell<u32>,
 
+    // ---- greedy argmax, computed where the logits are produced -----------
+    // The decode loop used to pick the next token by scanning all 25,353
+    // logits back out of PSRAM -- 101 KB per token at roughly half the bus
+    // rate, because a data-dependent branch per element leaves nothing to
+    // pipeline. Measured at 2.74 ms/token, the largest single line item left
+    // once the model math passed C.
+    //
+    // Both cores already hold each logit in a register the moment
+    // `rows_range` computes it, so each tracks the max over its own rows and
+    // the decode loop chooses between two candidates. Nothing is read back.
+    //
+    // f32 as bits: there is no AtomicF32 in core, same as `acts` above.
+    lo_max: AtomicU32,
+    lo_arg: AtomicUsize,
+    hi_max: AtomicU32,
+    hi_arg: AtomicUsize,
+
     // ---- generic parallel matvec ------------------------------------------
     // Which job the worker should run. Written by whichever core is dispatching
     // (always the inference core) before the notify that wakes the worker; the
@@ -160,7 +177,9 @@ impl Head {
     /// `y` must point to a valid, initialized `[f32; self.rows]` (or
     /// longer) that the caller has the right to write `y[r0..r1]` of --
     /// i.e. no other writer is touching that sub-range concurrently.
-    unsafe fn rows_range(&self, y: *mut f32, r0: usize, r1: usize) {
+    unsafe fn rows_range(&self, y: *mut f32, r0: usize, r1: usize) -> (f32, usize) {
+        let mut best_val = f32::NEG_INFINITY;
+        let mut best_idx = r0;
         let cols = self.cols;
         let rb = self.row_bytes;
         let w4 = self.w4;
@@ -193,7 +212,15 @@ impl Head {
             // SAFETY: caller's contract (see this fn's doc comment) is that
             // `y[r0..r1]` is this call's alone to write.
             unsafe { core::ptr::write(y.add(r), val) };
+            // Running argmax over this core's rows, on a value already in a
+            // register. Strictly `>`, so the LOWEST index wins a tie -- the
+            // same rule a `0..vocab_n` scan follows. See `last_argmax`.
+            if val > best_val {
+                best_val = val;
+                best_idx = r;
+            }
         }
+        (best_val, best_idx)
     }
 
     /// Ports `head_matvec_int8`. This is the closure body
@@ -247,7 +274,9 @@ impl Head {
         // until it returns -- the worker task, notified above, only ever
         // writes [0, split) (see `head_worker_main`). Disjoint index
         // ranges of the same buffer, concurrently, by construction.
-        unsafe { self.rows_range(y_ptr, split, self.rows) };
+        let (hi_val, hi_idx) = unsafe { self.rows_range(y_ptr, split, self.rows) };
+        self.hi_max.store(hi_val.to_bits(), Ordering::Relaxed);
+        self.hi_arg.store(hi_idx, Ordering::Relaxed);
         let t2 = unsafe { esp_timer_get_time() };
 
         // Blocks until `head_worker_main`'s `task::notify` (its half is
@@ -303,6 +332,30 @@ impl Head {
             self.prof_wait_us.get() as f32 / d,
             self.prof_worker_us.get() as f32 / d,
         ])
+    }
+
+    /// The index of the largest logit from the most recent `matvec`.
+    ///
+    /// Exactly what `for v in 0..rows { if logits[v] > best { .. } }` would
+    /// return, without reading the logits back. Each core tracked the maximum
+    /// over its own rows with a strict `>`, so within a half the lowest index
+    /// wins a tie; between halves `hi > lo` picks `hi` only on a strict win, so
+    /// a tie again resolves to the lower index. That is the same token a
+    /// front-to-back scan selects, in every case.
+    ///
+    /// Reads only what the worker published before its notify, and `matvec`
+    /// has already waited on that notify by the time this can be called.
+    pub fn last_argmax(&self) -> usize {
+        // Acquire pairs with the worker's Release store of `lo_arg`.
+        let lo_idx = self.lo_arg.load(Ordering::Acquire);
+        let lo = f32::from_bits(self.lo_max.load(Ordering::Relaxed));
+        let hi_idx = self.hi_arg.load(Ordering::Relaxed);
+        let hi = f32::from_bits(self.hi_max.load(Ordering::Relaxed));
+        if hi > lo {
+            hi_idx
+        } else {
+            lo_idx
+        }
     }
 
     /// Compute `y[..t.rows] = W * x` with the rows split across both cores.
@@ -449,8 +502,12 @@ extern "C" fn head_worker_main(arg: *mut core::ffi::c_void) {
                 // the notify below -- `Head::matvec`, which set up this job,
                 // only ever writes [split, rows) itself.
                 let w0 = unsafe { esp_timer_get_time() };
-                unsafe { head.rows_range(y_ptr, 0, split) };
+                let (lo_val, lo_idx) = unsafe { head.rows_range(y_ptr, 0, split) };
                 let w1 = unsafe { esp_timer_get_time() };
+                head.lo_max.store(lo_val.to_bits(), Ordering::Relaxed);
+                // Release: publishes lo_max alongside lo_arg to whoever reads
+                // them after this task's notify below.
+                head.lo_arg.store(lo_idx, Ordering::Release);
                 // Only this task writes this counter.
                 head.prof_worker_us
                     .set(head.prof_worker_us.get() + (w1 - w0) as u64);
@@ -525,6 +582,10 @@ pub fn stage_and_spawn(tok_emb: QT<'static>, vocab_n: usize) -> Result<&'static 
         prof_wait_us: Cell::new(0),
         prof_worker_us: Cell::new(0),
         prof_calls: Cell::new(0),
+        lo_max: AtomicU32::new(f32::NEG_INFINITY.to_bits()),
+        lo_arg: AtomicUsize::new(0),
+        hi_max: AtomicU32::new(f32::NEG_INFINITY.to_bits()),
+        hi_arg: AtomicUsize::new(0),
         job_kind: AtomicU32::new(JOB_HEAD),
         mv_qt: AtomicPtr::new(core::ptr::null_mut()),
         mv_x: AtomicPtr::new(core::ptr::null_mut()),

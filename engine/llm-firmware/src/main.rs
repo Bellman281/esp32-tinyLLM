@@ -383,30 +383,19 @@ fn main() {
         if pos >= model.cfg.seq_len {
             break;
         }
-        // Greedy: argmax over the trained vocab only (NOT model.cfg.vocab
-        // -- see head::stage_and_spawn's doc comment on why rows at/above
-        // vocab_n in s.logits are never written and must not be scored).
-        // Slice once, iterate. `vocab_n` is a runtime value, so indexing
-        // `scratch.logits[v]` inside `0..vocab_n` cannot have its bounds check
-        // hoisted -- 25,353 checked loads per token, twice each. Slicing to a
-        // provable length hands the backend the fact instead. Same comparison
-        // order and the same strict `>`, so the same token wins a tie: this is
-        // bit-identical, and `cli_parity.rs` would catch it if it were not.
+        // Greedy pick.
+        // No scan. Both cores tracked the maximum over their own rows while
+        // computing the logits, so this reads two candidates instead of
+        // 25,353 floats back out of PSRAM. Same token either way -- see
+        // `Head::last_argmax` for why the tie-breaking is identical to a
+        // front-to-back scan.
         //
-        // This sits OUTSIDE the profiled stages, which is why nobody looked at
-        // it: at a 60 ms gap it was noise. With the model math now at 119.4 ms
-        // against C's 119.8, the ~3 ms outside the stages is the whole
-        // remaining difference on wall clock.
+        // `vocab_n` is not passed here because the head was already staged
+        // with `rows = vocab_n`, so rows at or above it were never computed
+        // and cannot be the maximum. That is the same invariant the old scan
+        // relied on, enforced at staging time instead of at pick time.
         let a0 = unsafe { esp_timer_get_time() };
-        let mut best = 0usize;
-        let mut bv = f32::NEG_INFINITY;
-        for (v, &l) in scratch.logits[..vocab_n].iter().enumerate() {
-            if l > bv {
-                bv = l;
-                best = v;
-            }
-        }
-        tok = best;
+        tok = head.last_argmax();
         let a1 = unsafe { esp_timer_get_time() };
         emit(&mut out, tok);
         let a2 = unsafe { esp_timer_get_time() };
