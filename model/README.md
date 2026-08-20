@@ -61,7 +61,7 @@ published release — that artifact is a different file:
 The 16-byte difference is the header, not the weights: upstream's current
 exporter writes a 56-byte versioned header, this file carries the older
 40-byte one. Same architecture, so the tensor payload is the same size either
-way. See [`TRAINING.md`](../TRAINING.md)'s "The export format gap".
+way. See [`TRAINING.md`](../TRAINING.md)'s "The two header formats".
 
 `reference-c/esp32-llm-lab/` also contains a `model.bin` and `vocab.h`. Those
 belong to the frozen C mirror — `gen_prompt.c` `#include`s that `vocab.h` at
@@ -132,8 +132,10 @@ largest single term in the C-vs-Rust gap (see
 [`BENCHMARKING.md`](../BENCHMARKING.md)), which makes this worth knowing.
 
 Upstream's current export format carries `output_vocab` separately from
-`input_vocab` precisely so a runtime can skip that work. This repo's readers
-predate it — see [`TRAINING.md`](../TRAINING.md)'s "The export format gap".
+`input_vocab` precisely so a runtime can skip that work, and `llm-core` now
+reads it — but this file is in the older format, which cannot express the
+distinction, so all 32,768 rows are still scored for *this* model. See
+[`TRAINING.md`](../TRAINING.md)'s "The two header formats".
 
 ## Architecture
 

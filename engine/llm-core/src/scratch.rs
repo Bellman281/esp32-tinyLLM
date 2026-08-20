@@ -70,7 +70,7 @@ pub fn sizes(cfg: &Cfg) -> ScratchSizes {
         trow: lp,
         rope_cos: half_head,
         rope_sin: half_head,
-        logits: cfg.vocab,
+        logits: cfg.out_vocab,
         scores: cfg.seq_len,
         kcache: cfg.n_layers * cfg.seq_len * cfg.dim,
         vcache: cfg.n_layers * cfg.seq_len * cfg.dim,

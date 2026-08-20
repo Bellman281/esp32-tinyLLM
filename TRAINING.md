@@ -17,16 +17,15 @@ different artifact from upstream's published release — see
 [`model/README.md`](./model/README.md) for the two checksums and why they differ
 by exactly 16 bytes.
 
-> **Read this first if you plan to run the exporter.** The pipeline below
-> reproduces every artifact *except* `model.bin` itself. The current upstream
-> exporter writes a header format this repo's readers reject — see
-> [The export format gap](#the-export-format-gap). Everything up to and
-> including training works today; the last step needs a shim that does not exist
-> yet.
+> **Note on the exporter.** It writes a newer header format than the shipped
+> `model.bin` uses. `llm-core` reads both, so the pipeline below round-trips —
+> but the frozen C reference still only reads the old one, so a freshly
+> exported model runs under Rust and not under the C tools. See
+> [The two header formats](#the-two-header-formats).
 
 ## What the shipped model actually is
 
-Read straight out of `reference-c/esp32-llm-lab/model.bin`'s header and
+Read straight out of `model/tinystories-v32768/model.bin`'s header and
 `vocab.h`, not quoted from anywhere:
 
 | | |
@@ -43,10 +42,6 @@ Read straight out of `reference-c/esp32-llm-lab/model.bin`'s header and
 | Corpus | [TinyStories](https://arxiv.org/abs/2305.07759) (Eldan & Li, 2023), first 300 MiB of the HF train split |
 | Trained | 2 August 2026, rented VPS GPU, by this repo's author |
 | File | `model/tinystories-v32768/model.bin`, 14.91 MB, sha256 `3e5870b4…7fa7bbe` |
-
-> `model/README.md` currently says `vocab.h` has "32,768 entries — matches this
-> `model.bin`'s vocab size". It has 25,353. The 32,768 is the embedding row
-> count. Both numbers are real; they are not the same number.
 
 ## Setup
 
@@ -196,35 +191,48 @@ out_norm
 Quantized tensors are written as `int32 group`, then int4 codes packed two per
 byte, then fp16 scales. Norms are raw fp32.
 
-### The export format gap
+### The two header formats
 
-**This is the blocker.** The two ends do not agree on the header:
+The exporter and this repo's readers disagree on the *preamble*. The tensor
+stream after it is byte-for-byte the same in both.
 
 | | magic | layout |
 |---|---|---|
-| This repo — `llm.h` `LLM_MAGIC`, `llm-core/src/tensor.rs` `MAGIC` | `0x504C4531` = `"PLE1"` | `magic, V, D, L, H, F, P, seq_len, group, rope_theta` — 8 ints, no version field |
-| Upstream `export.py` today | `0x00454C50` = `"PLE\0"` | `magic, version, header_bytes, flags, input_vocab, output_vocab,` then config |
+| Shipped `model.bin`, and the frozen C reference (`llm.h` `LLM_MAGIC`) | `0x504C4531` = `"PLE1"` | `magic, V, D, L, H, F, P, seq_len, group, rope_theta` — 8 ints, no version field |
+| `export.py` today | `0x00454C50` = `"PLE\0"` | `magic, version, header_bytes, flags, input_vocab, output_vocab,` then config |
 
-The shipped `model.bin` is in the **`"PLE1"`** form — verified by reading its
-first bytes. Upstream's exporter has since moved to a versioned header carrying
-`flags` (bit 0 = tied head) and a separate `input_vocab`/`output_vocab`, which is
-strictly better: it is what lets the runtime score only the 25,353 real tokens
-instead of all 32,768 padded embedding rows.
+The newer format is strictly better: `header_bytes` lets a later version append
+fields without breaking existing readers, `flags` bit 0 records whether the head
+is tied to the embedding, and `output_vocab` is separate from `input_vocab` —
+which is what lets a runtime score only the 25,353 real tokens instead of all
+32,768 padded embedding rows.
 
-So a `model.bin` produced by the pipeline above today **will fail `Model::load`
-with `BadMagic`.** Closing this needs one of:
+**`llm-core` reads both.** `Model::load` accepts either magic, honours
+`output_vocab` where it is declared, and refuses an untied head, an unknown
+format version, or an `output_vocab` larger than the embedding, rather than
+misparsing them. `engine/llm-host/tests/header_v2.rs` is the gate: it rewrites
+the real `model.bin`'s header into the newer form and asserts the logits come
+out bit-identical, then that a narrowed `output_vocab` matches the prefix of the
+full run. A `PLE1` file keeps scoring every embedding row, because that format
+cannot express the distinction and the C reference scores all of them —
+narrowing there would silently change greedy decode.
 
-1. a converter (`"PLE\0"` → `"PLE1"`, dropping flags, asserting tied-head), or
-2. teaching `llm-core` and `llm.h` to read both — which means honoring
-   `output_vocab` and shrinking the head accordingly, and is the version worth
-   having, or
-3. finding the older exporter revision that wrote `"PLE1"` and pinning
-   `training/` to it.
+**Two caveats, both real:**
 
-Option 2 also closes the gap `model/README.md` flags: this repo has **no
-PyTorch golden-logit reference for the 28.9M model it actually flashes** —
-`golden.rs` checks the smaller V=4096 fixture instead. A working export path
-produces that missing golden as a side effect.
+1. **The C reference still only reads `PLE1`.** `reference-c/` is a frozen
+   mirror refreshed wholesale from upstream, not patched here (CONTRIBUTING
+   ground rule 1), so a `PLE\0` model runs under Rust but not under the C
+   tools — which means `cli_parity.rs` and the `ppl` C binary cannot check it.
+   Fixing that belongs upstream.
+2. **No real exporter output has been round-tripped yet.** The test fixtures
+   are the shipped weights with a rewritten header, which exercises the parse
+   but not `export.py` end to end. That needs a trained checkpoint; when
+   someone produces one, run it through and confirm.
+
+Still open, and unchanged by this: this repo has **no PyTorch golden-logit
+reference for the 28.9M model it actually flashes** — `golden.rs` checks the
+smaller V=4096 fixture instead. A completed export run produces that missing
+golden as a side effect.
 
 ## 5. Generate `vocab.h`
 

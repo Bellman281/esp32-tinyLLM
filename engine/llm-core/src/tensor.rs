@@ -9,6 +9,19 @@
 
 const MAGIC: u32 = 0x504C_4531;
 
+/// The exporter's current header: `b"PLE\0"` little-endian. Same tensor
+/// stream as `MAGIC`, different preamble -- it carries a format version, a
+/// self-describing header length, a flags word, and an `output_vocab`
+/// distinct from the embedding's row count. See `Model::load`.
+const MAGIC_V2: u32 = 0x0045_4C50;
+
+/// `MAGIC_V2` flags, bit 0: the output head *is* the token embedding and no
+/// separate head tensor follows. The only layout this port implements.
+const FLAG_TIED_HEAD: u32 = 1 << 0;
+
+/// Highest `MAGIC_V2` format version this reader understands.
+const MAX_FORMAT_VERSION: u32 = 1;
+
 /// Round-half-to-even, matching C's `lrintf` under the IEEE754 default
 /// rounding mode (`FE_TONEAREST`). `core`/`libm` don't expose this for
 /// no_std (`f32::round_ties_even` is std-only), so it's implemented by
@@ -74,13 +87,30 @@ pub enum LoadError {
     TooShort,
     BadMagic,
     TooManyLayers,
+    /// A `PLE\0` file declaring a format version newer than this reader.
+    UnsupportedVersion(u32),
+    /// A `PLE\0` file whose head is a separate tensor rather than a view of
+    /// the token embedding. Its weights are laid out differently and this
+    /// port has no model to verify such a file against, so it is refused
+    /// rather than guessed at.
+    UntiedHead,
+    /// `output_vocab` outside `1..=input_vocab`. The tied head is the first
+    /// `output_vocab` rows of the embedding, so a larger value would read
+    /// past that tensor.
+    BadOutputVocab,
 }
 
 /// Mirrors C's `Cfg`. All dims stored as `usize` (C uses `int`, always
 /// non-negative in this file format).
 #[derive(Debug, Clone, Copy)]
 pub struct Cfg {
+    /// Rows in the token embedding and the PLE table.
     pub vocab: usize,
+    /// Logits actually scored: the tokenizer's real entry count. Equal to
+    /// `vocab` for `PLE1` files, which cannot express the distinction; a
+    /// `PLE\0` file may declare it smaller, because the embedding is padded
+    /// above the tokenizer and those rows can never be emitted.
+    pub out_vocab: usize,
     pub dim: usize,
     pub n_layers: usize,
     pub n_heads: usize,
@@ -320,10 +350,29 @@ impl<'a> QT<'a> {
     /// agreement with the previously-captured C-reference numbers) and
     /// `cli_parity.rs`'s int8 greedy-decode byte-for-byte check.
     pub fn matvec_int8_activations(&self, x: &[f32], y: &mut [f32], iq: &mut [i8]) {
+        let rows = self.rows;
+        self.matvec_int8_activations_range(x, y, iq, 0, rows);
+    }
+
+    /// `matvec_int8_activations` over `row_begin..row_end` only.
+    ///
+    /// The activation quantization is over `x`, not over rows, so it is
+    /// computed identically whatever range is asked for -- the full-range
+    /// call is bit-for-bit what the single-loop version produced, which is
+    /// what lets `golden.rs` and `ppl_parity.rs` keep their exact-match
+    /// assertions against the captured C int8 numerics.
+    pub fn matvec_int8_activations_range(
+        &self,
+        x: &[f32],
+        y: &mut [f32],
+        iq: &mut [i8],
+        row_begin: usize,
+        row_end: usize,
+    ) {
         let n = self.cols;
         let x_scale = quantize_activations(&x[..n], &mut iq[..n]);
 
-        for r in 0..self.rows {
+        for r in row_begin..row_end {
             let row = &self.codes[r * self.row_bytes..(r + 1) * self.row_bytes];
             let mut acc = 0f32;
             for gi in 0..self.n_groups {
@@ -442,3 +491,6 @@ impl<'a> Cursor<'a> {
 }
 
 pub(crate) const MAGIC_CHECK: u32 = MAGIC;
+pub(crate) const MAGIC_V2_CHECK: u32 = MAGIC_V2;
+pub(crate) const FLAG_TIED_HEAD_CHECK: u32 = FLAG_TIED_HEAD;
+pub(crate) const MAX_FORMAT_VERSION_CHECK: u32 = MAX_FORMAT_VERSION;
