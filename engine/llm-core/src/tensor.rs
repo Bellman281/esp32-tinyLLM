@@ -514,17 +514,95 @@ impl<'a> QT<'a> {
 /// `actq` the quantized activations (`cols` of them). Assumes `n_groups == 1`
 /// for the row — the same contract `unpack_row_int8` documents, and true of
 /// every shipped model's `tok_emb` (`group = 128 >= cols = 96`).
+/// Independent accumulators in `dot_int4_int8`. Four, because that is what
+/// breaks the dependency chain without needing more live registers than the
+/// LX7 comfortably has.
+///
+/// WHY. Both this and the C reference's `dot_i8` accumulate into ONE variable,
+/// so every iteration's add waits on the previous one. On the ESP32-S3 the
+/// head measured ~18 cycles per multiply-accumulate (91.0 ms for 2.43M MACs
+/// across two cores at 240 MHz) while using 19% of the memory bandwidth the
+/// same firmware measures on the same buffer -- so it is not starved for
+/// bytes, and 18 cycles is far more than the instructions require. Latency
+/// stalls on that chain are the obvious remaining candidate.
+///
+/// Four accumulators means four chains progressing in parallel, so the adds
+/// interleave instead of queueing.
+///
+/// This showed nothing on x86 when measured in isolation, because LLVM
+/// auto-vectorises the single-accumulator loop there and has already broken
+/// the chain. Xtensa has no autovectorisation, so the chain survives -- which
+/// is why a host measurement was worth ignoring here.
+///
+/// EXACT. `i32` addition is associative, and regrouping a finite integer sum
+/// cannot change it. No term is dropped or reordered into a different value;
+/// only the bracketing moves. `llm-host/tests/int4_head_equivalence.rs`
+/// asserts the result against the unpacked-int8 dot over every row of the real
+/// model, so this stays a proof rather than an argument.
+const DOT_LANES: usize = 4;
+
+/// int8-activation dot product against a row of **packed int4 codes**, without
+/// unpacking the row first. Returns the raw `i32` accumulation; the caller
+/// applies the row scale and the activation scale, exactly as
+/// `matvec_int8_activations` does.
+///
+/// WHY THIS EXISTS. `llm-firmware` stages the tied output head into PSRAM at
+/// boot. Staging it as unpacked int8 (what the C reference's `stage_head_int8`
+/// does) doubles what the head streams per token, 2.54 MB against 1.32 MB, and
+/// costs 1.2 MB of PSRAM. Reading the packed nibbles directly halves both.
+///
+/// Measured on device, that trade trades: the head did not get faster, because
+/// it turned out not to be bandwidth-bound. It is kept for the PSRAM and
+/// because it makes the arithmetic the only thing left to attack -- see
+/// `DOT_LANES` above for the attack.
+///
+/// EXACT, not approximate: every term is identical to the one the unpacked
+/// path produces and `i32` addition is associative, so this returns bit-for-bit
+/// what a dot over the staged int8 row returns.
+///
+/// `row_codes` is one row of `QT::codes` (`row_bytes = ceil(cols/2)` bytes) and
+/// `actq` the quantized activations (`cols` of them). Assumes `n_groups == 1`
+/// for the row -- the same contract `unpack_row_int8` documents, and true of
+/// every shipped model's `tok_emb` (`group = 128 >= cols = 96`).
 #[inline]
 pub fn dot_int4_int8(row_codes: &[u8], actq: &[i8]) -> i32 {
     let cols = actq.len();
     let pairs = cols / 2;
-    let mut acc: i32 = 0;
-    // Two activations per packed byte, the same shape every other unpack site
-    // in this file uses; see `matvec_range`'s note on why it is driven by a zip
-    // over pre-sliced runs rather than by an index.
-    for (b, ap) in row_codes[..pairs].iter().zip(actq[..2 * pairs].chunks_exact(2)) {
-        acc += NIBBLE_I8[(b & 0xF) as usize] as i32 * ap[0] as i32;
-        acc += NIBBLE_I8[(b >> 4) as usize] as i32 * ap[1] as i32;
+
+    // Each block is DOT_LANES packed bytes -> 2*DOT_LANES elements, spread so
+    // that lane L only ever accumulates into itself.
+    let blocks = pairs / DOT_LANES;
+    let mut lanes = [0i32; DOT_LANES];
+    let bytes = &row_codes[..blocks * DOT_LANES];
+    let acts = &actq[..blocks * DOT_LANES * 2];
+    for (bq, aq) in bytes
+        .chunks_exact(DOT_LANES)
+        .zip(acts.chunks_exact(DOT_LANES * 2))
+    {
+        for l in 0..DOT_LANES {
+            let b = bq[l];
+            lanes[l] += NIBBLE_I8[(b & 0xF) as usize] as i32 * aq[2 * l] as i32;
+            lanes[l] += NIBBLE_I8[(b >> 4) as usize] as i32 * aq[2 * l + 1] as i32;
+        }
+    }
+
+    // Pairwise combine rather than a running sum: same value either way for
+    // integers, one less serial step.
+    let mut acc = 0i32;
+    let mut half = DOT_LANES;
+    while half > 1 {
+        half /= 2;
+        for l in 0..half {
+            lanes[l] += lanes[l + half];
+        }
+    }
+    acc += lanes[0];
+
+    // Tail: whole bytes the blocking did not cover, then a final odd element.
+    for (k, b) in row_codes[blocks * DOT_LANES..pairs].iter().enumerate() {
+        let j = (blocks * DOT_LANES + k) * 2;
+        acc += NIBBLE_I8[(b & 0xF) as usize] as i32 * actq[j] as i32;
+        acc += NIBBLE_I8[(b >> 4) as usize] as i32 * actq[j + 1] as i32;
     }
     if cols & 1 == 1 {
         acc += NIBBLE_I8[(row_codes[pairs] & 0xF) as usize] as i32 * actq[cols - 1] as i32;
