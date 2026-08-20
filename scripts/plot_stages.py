@@ -205,6 +205,16 @@ def table(doc, runs):
         for st in str(rb.get("provisional_stages", "")).split():
             mark[(id(rb), st)] = " †"
 
+    # A run flagged `experimental` is shown but does NOT become "now".
+    #
+    # Without this, adding a row measured on a board config the repo does not
+    # ship -- 120 MHz MSPI, which needs CONFIG_IDF_EXPERIMENTAL_FEATURES and is
+    # temperature-sensitive -- would silently rewrite the headline percentage
+    # and the "ratio vs C" row to describe a firmware nobody gets by cloning.
+    # The measurement is real and belongs in the table; the claim built on top
+    # of it is not the project's claim.
+    shipping = [rb for _, rb in runs if not rb.get("experimental")]
+
     # `stages` is the profiled sum; `wall` is the number a user experiences.
     # They diverge by whatever sits outside the profiled stages -- 2.2 ms for
     # the C reference, and 0.03 for Rust since the argmax moved into the head.
@@ -213,10 +223,11 @@ def table(doc, runs):
          "|---" * (len(STAGES) + 4) + "|"]
     for _, rb in runs:
         cells = [f"{rb[st]:.1f}{mark.get((id(rb), st), '')}" for st in STAGES]
-        o.append(f"| **{rb['label']}** | " + " | ".join(cells) +
+        star = " ‡" if rb.get("experimental") else ""
+        o.append(f"| **{rb['label']}**{star} | " + " | ".join(cells) +
                  f" | {tot(rb):.1f} | **{rb['wall_ms']:.1f}** | {rb['tok_s']:.2f} |")
 
-    last = runs[-1][1]
+    last = shipping[-1] if shipping else runs[-1][1]
     if len(runs) > 1:
         o.append("| ratio vs " + str(ref["label"]) + " | " +
                  " | ".join(f"{last[st]/ref[st]:.2f}x" for st in STAGES) +
@@ -224,11 +235,19 @@ def table(doc, runs):
         o.append("| absolute gap | " +
                  " | ".join(f"{last[st]-ref[st]:+.1f}" for st in STAGES) +
                  f" | {tot(last)-tot(ref):+.1f} | **{last['wall_ms']-ref['wall_ms']:+.1f}** | |")
-    if len(runs) > 2:
-        prev = runs[-2][1]
+    if len(shipping) > 2:
+        prev = shipping[-2]
         o.append("| **change this brought** | " +
                  " | ".join(f"{last[st]-prev[st]:+.1f}" for st in STAGES) +
                  f" | {tot(last)-tot(prev):+.1f} | **{last['wall_ms']-prev['wall_ms']:+.1f}** | |")
+
+    exp_runs = [rb for _, rb in runs if rb.get("experimental")]
+    if exp_runs:
+        o.append("")
+        for rb in exp_runs:
+            o.append(f"‡ **{rb['label']} is not the shipping configuration** and is "
+                     f"excluded from the ratios and the summary below. "
+                     f"{rb.get('experimental_note', '')}")
 
     notes = [rb for _, rb in runs if rb.get("provisional_stages")]
     if notes:
@@ -350,7 +369,12 @@ def main():
         want = [r.strip() for r in a.chart_runs.split(",") if r.strip()]
         chart = runs_of(doc, want)
     elif len(runs) > 3:
-        chart = [runs[0], runs[1], runs[-1]]
+        # Same rule as the table's headline: an experimental run is shown in
+        # the table but must not become the "now" bar in the README's chart,
+        # which is the one figure most people will read and none of them will
+        # read the footnote for.
+        ship = [r for r in runs if not r[1].get("experimental")]
+        chart = [runs[0], runs[1], (ship or runs)[-1]]
 
     os.makedirs(OUT, exist_ok=True)
     for mode, name in (("light", "benchmark-stages.svg"), ("dark", "benchmark-stages-dark.svg")):
