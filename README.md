@@ -5,7 +5,7 @@
 The ESP32-S3 has 512 KB of SRAM. This model has 28.9M parameters. It fits because
 ~25M of them live in a flash-mapped Per-Layer Embedding table (Gemma 3n's trick,
 three orders of magnitude down) and the rest are 4-bit quantized. It writes short
-stories at 8.4 tok/s — see the measured table below.
+stories at 9.4 tok/s — see the measured table below.
 
 This repo is a ground-up Rust port of the inference engine, ported function for
 function from [slvDev/esp32-ai](https://github.com/slvDev/esp32-ai)'s C
@@ -71,17 +71,19 @@ word.
 | **+ argmax/stdout** | 3.8 | 39.8 | 6.0 | 7.3 | 61.5 | 118.4 | **121.1** | 8.25 |
 | **+ argmax in head** | 3.9 | 40.0 | 6.1 | 7.5 | 61.5 | 119.0 | **119.0** | 8.40 |
 | **+ attn instrumented** | 3.9 | 39.0 | 6.2 | 7.6 | 61.9 | 118.6 | **118.5** | 8.43 |
-| ratio vs C reference | 0.89x | 0.91x | 0.90x | 0.89x | 1.08x | 0.99x | **0.97x** | |
-| absolute gap | -0.5 | -3.9 | -0.7 | -0.9 | +4.8 | -1.2 | **-3.5** | |
-| **change this brought** | +0.0 | -1.0 | +0.1 | +0.1 | +0.4 | -0.4 | **-0.5** | |
+| **Rust, now** | 3.9 | 26.4 | 6.2 | 7.6 | 62.7 | 106.8 | **106.8** | 9.36 |
+| ratio vs C reference | 0.89x | 0.62x | 0.90x | 0.89x | 1.10x | 0.89x | **0.88x** | |
+| absolute gap | -0.5 | -16.5 | -0.7 | -0.9 | +5.6 | -13.0 | **-15.2** | |
+| **change this brought** | +0.0 | -12.6 | +0.0 | +0.0 | +0.8 | -11.8 | **-11.7** | |
 
 **`attn` broken down** — the sub-stages the five-stage profile hides. `qkv`/`proj` are the fp32 matvec that also drives `ffn` and `ple`; `core` is attention proper, the only part that grows with sequence position. The C reference has no equivalent instrumentation, so it is absent rather than zero.
 
 | attn ms/token | qkv | rope | core | proj | sum | both cores |
 |---|---|---|---|---|---|---|
 | **+ attn instrumented** | 7.8 | 0.14 | 28.3 | 2.7 | 38.9 | `qkv`, `proj` |
+| **Rust, now** | 7.9 | 0.15 | 15.6 | 2.7 | 26.3 | `qkv`, `proj`, `core` |
 
-**Rust is 3.0% faster per token than the C reference it was ported from** — 118.5 ms against 122.0, 8.43 tok/s against 8.20, on the same board with byte-identical output. It beats C on 4 of the 5 stages.
+**Rust is 14.2% faster per token than the C reference it was ported from** — 106.8 ms against 122.0, 9.36 tok/s against 8.20, on the same board with byte-identical output. It beats C on 4 of the 5 stages.
 
 <!-- END device-table -->
 

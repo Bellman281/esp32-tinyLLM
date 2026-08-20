@@ -45,17 +45,19 @@ either firmware drifts from them.
 | **+ argmax/stdout** | 3.8 | 39.8 | 6.0 | 7.3 | 61.5 | 118.4 | **121.1** | 8.25 |
 | **+ argmax in head** | 3.9 | 40.0 | 6.1 | 7.5 | 61.5 | 119.0 | **119.0** | 8.40 |
 | **+ attn instrumented** | 3.9 | 39.0 | 6.2 | 7.6 | 61.9 | 118.6 | **118.5** | 8.43 |
-| ratio vs C reference | 0.89x | 0.91x | 0.90x | 0.89x | 1.08x | 0.99x | **0.97x** | |
-| absolute gap | -0.5 | -3.9 | -0.7 | -0.9 | +4.8 | -1.2 | **-3.5** | |
-| **change this brought** | +0.0 | -1.0 | +0.1 | +0.1 | +0.4 | -0.4 | **-0.5** | |
+| **Rust, now** | 3.9 | 26.4 | 6.2 | 7.6 | 62.7 | 106.8 | **106.8** | 9.36 |
+| ratio vs C reference | 0.89x | 0.62x | 0.90x | 0.89x | 1.10x | 0.89x | **0.88x** | |
+| absolute gap | -0.5 | -16.5 | -0.7 | -0.9 | +5.6 | -13.0 | **-15.2** | |
+| **change this brought** | +0.0 | -12.6 | +0.0 | +0.0 | +0.8 | -11.8 | **-11.7** | |
 
 **`attn` broken down** — the sub-stages the five-stage profile hides. `qkv`/`proj` are the fp32 matvec that also drives `ffn` and `ple`; `core` is attention proper, the only part that grows with sequence position. The C reference has no equivalent instrumentation, so it is absent rather than zero.
 
 | attn ms/token | qkv | rope | core | proj | sum | both cores |
 |---|---|---|---|---|---|---|
 | **+ attn instrumented** | 7.8 | 0.14 | 28.3 | 2.7 | 38.9 | `qkv`, `proj` |
+| **Rust, now** | 7.9 | 0.15 | 15.6 | 2.7 | 26.3 | `qkv`, `proj`, `core` |
 
-**Rust is 3.0% faster per token than the C reference it was ported from** — 118.5 ms against 122.0, 8.43 tok/s against 8.20, on the same board with byte-identical output. It beats C on 4 of the 5 stages.
+**Rust is 14.2% faster per token than the C reference it was ported from** — 106.8 ms against 122.0, 9.36 tok/s against 8.20, on the same board with byte-identical output. It beats C on 4 of the 5 stages.
 
 <!-- END device-table -->
 
@@ -435,9 +437,27 @@ S3's SIMD unit, not more flag-tuning.
 
 ## What to optimize next
 
-Two levers, ranked by what the measured table says.
+Ranked by what the measured table says, as of `Rust, now`:
 
-### 1. The fp32 matvec — partly done; SIMD still open
+| | ms/token | share of a token | vs C |
+|---|---|---|---|
+| **output head** | 62.7 | 59% | 1.10x — the only stage still behind |
+| fp32 matvec (`input` + `ffn` + `ple` + `qkv` + `proj`) | 28.3 | 26% | 0.89x |
+| attention `core` | 15.6 | 15% | not separately instrumented in C |
+
+The ordering has inverted since this section was written. The fp32 matvec was
+the top lever when `ple`/`input`/`ffn` sat at ~1.5x of C; they are now 0.89x
+and the head is 59% of a token on its own. **The head is the target**, and it
+is the one place where the remaining gap is a like-for-like instruction-count
+difference rather than a structural one: at 62.7 ms across two cores it runs
+~12.4 cycles per multiply-accumulate against C's ~11.3, so roughly 10% of the
+head is scheduling rather than work.
+
+A third item is now open that was not before — see
+[Is attention's `core` bandwidth-bound?](#is-attentions-core-bandwidth-bound)
+below. It is a measurement, not an optimization, and it is cheap.
+
+### The fp32 matvec — partly done; SIMD still open
 
 **Update.** `ple` (1.79x), `input` (1.77x) and `ffn` (1.72x) were the three
 furthest from parity, all running through `QT::matvec_range`. Two bit-exact
@@ -491,7 +511,7 @@ first, and benchmark. An FFI call per row has real overhead at these row
 lengths (66–128 elements), so this is **not** a guaranteed win — it needs a
 before/after on hardware, not an assumption that SIMD is faster.
 
-### 2. The output head — done, and the diagnosis was the whole story
+### The output head — the arithmetic fixes are done; the diagnosis was the whole story
 
 **Resolved. The head went 94.6 -> 61.5 ms, 1.66x -> 1.08x of C.** What follows
 is kept because the reasoning that got there is reusable and the reasoning that
@@ -544,9 +564,9 @@ about the stage.**
 
 At +40.9 ms/token the head is now **roughly two-thirds of the entire
 Rust-vs-C gap** — it was 56% before the nibble-LUT change shrank everything
-else — and far more than any other stage in absolute terms. (Its own figure is
-provisional: see the table's footnote. Even at its previously recorded 90.3 it
-is 65% of the gap, so the conclusion does not depend on settling that.) It
+else — and far more than any other stage in absolute terms. (Its figure was marked
+provisional at the time; it no longer is, and the run it referred to is
+`+ wider caches` in the generated table.) It
 is already int8-staged and split across both cores, and it streams 2.43 MB
 of PSRAM per token. The `+ wider caches` change moved it more than any
 other stage (-21%), pointing at memory bandwidth rather than instruction
@@ -555,11 +575,29 @@ is *before* assuming SIMD is the answer —
 `reference-c/firmware/bandwidth_bench/` exists for exactly this measurement
 and has not been ported (Phase 5).
 
-### Not a priority: `attn` (1.27x)
+### Is attention's `core` bandwidth-bound?
 
-Closest stage to parity. Earlier revisions recommended it as the top target
-on the strength of a 2.10x figure that was a benchmark artifact — see
-[Why matched settings matter](#why-matched-settings-matter).
+Open, and cheap to settle. Splitting the four attention heads two-per-core
+took `core` from 28.3 to 15.6 ms. A perfect halving would be 14.15, plus the
+0.1 ms of measured sync = 14.25. **1.35 ms, 9.5%, did not come back**, and
+this run cannot say which of two causes it is:
 
-Both levers need real ESP-IDF hardware to benchmark. Good first issues for
+- **Bus contention.** Both cores now scan the same KV cache at the same time.
+  The head was shown to be compute-bound precisely because two cores each
+  independently completed their half at the same speed as one — attention may not have
+  that property, since `core` reads far more memory per unit of arithmetic.
+- **The layout tax.** This binary's boot-time PSRAM probe reads **68 MB/s
+  against the previous binary's 72** — the same probe, the same buffer, the
+  same code, before generation starts. That is a 5.6% slower memory path from
+  placement alone, and `head` moved +0.8 ms in the same binary without
+  `head.rs` changing. Most of the 9.5% may simply be this.
+
+The experiment that separates them: run `psram::probe_read_bandwidth` on both
+cores simultaneously and compare against one core. If aggregate throughput
+does not scale, attention is contending and the fix is a smaller working set
+(fp16 KV cache halves it); if it does scale, the shortfall was placement and
+there is nothing to chase. `reference-c/firmware/bandwidth_bench/` is the
+C-side prior art and is still unported (Phase 5).
+
+All three items need real ESP-IDF hardware to benchmark. Good first issues for
 a contributor who has a board — see [CONTRIBUTING.md](./CONTRIBUTING.md).
