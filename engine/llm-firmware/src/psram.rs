@@ -20,7 +20,9 @@
 //! pass over a few MB at boot (once, not per-token) and removes any need
 //! to reason about it here.
 
-use esp_idf_svc::hal::sys::{heap_caps_get_free_size, heap_caps_malloc, MALLOC_CAP_SPIRAM};
+use esp_idf_svc::hal::sys::{
+    esp_timer_get_time, heap_caps_get_free_size, heap_caps_malloc, MALLOC_CAP_SPIRAM,
+};
 use llm_core::{Cfg, Scratch};
 
 /// Ports `ps()`: PSRAM-malloc `n` bytes or halt. The C reference prints and
@@ -91,15 +93,19 @@ pub fn alloc_scratch_psram(cfg: &Cfg) -> Scratch<'static> {
     }
 }
 
-/// Allocates the staged int8 head's two PSRAM tables
-/// (`head_w8`/`head_scale8` in the C reference). Split out from
-/// `head::stage_int8` so this module stays the single place that knows how
-/// to talk to `heap_caps_malloc`.
-pub fn alloc_head_tables(rows: usize, cols: usize) -> (&'static mut [i8], &'static mut [f32]) {
-    // SAFETY: i8/f32, zero is a valid bit pattern for both; every element
-    // is overwritten by `head::stage_int8` immediately after this returns,
-    // before any of it is read.
-    unsafe { (ps_slice(rows * cols), ps_slice(rows)) }
+/// Allocates the staged head's two PSRAM tables (`head_w8`/`head_scale8` in
+/// the C reference). Split out from `head::stage_and_spawn` so this module
+/// stays the single place that knows how to talk to `heap_caps_malloc`.
+///
+/// `weight_bytes` is `rows * cols` for the int8 staging the C reference does,
+/// or `rows * row_bytes` (half that) when the head is staged as packed int4 --
+/// see `head::stage_and_spawn`. Taking bytes rather than (rows, cols) keeps
+/// that choice in one place instead of two.
+pub fn alloc_head_tables(weight_bytes: usize, rows: usize) -> (&'static mut [u8], &'static mut [f32]) {
+    // SAFETY: u8/f32, zero is a valid bit pattern for both; every element is
+    // overwritten by the caller immediately after this returns, before any of
+    // it is read.
+    unsafe { (ps_slice(weight_bytes), ps_slice(rows)) }
 }
 
 /// Ports `heap_caps_get_free_size(MALLOC_CAP_SPIRAM)` for the boot log line
@@ -108,4 +114,43 @@ pub fn free_psram_bytes() -> usize {
     // SAFETY: no arguments beyond the capability mask, no preconditions
     // beyond the heap being initialized (true by the time `main` runs).
     unsafe { heap_caps_get_free_size(MALLOC_CAP_SPIRAM) as usize }
+}
+
+/// Sequential read bandwidth of `buf`, in MB/s, measured by streaming it once.
+///
+/// The minimum useful piece of `reference-c/firmware/bandwidth_bench/` (Phase 5,
+/// still unported): enough to turn "the head is probably memory-bound" into a
+/// number. Point it at the staged head weights and the answer is directly
+/// comparable to what the head does per token -- same buffer, same direction,
+/// same cold-stream access pattern, nothing cached between passes because it is
+/// far larger than the data cache.
+///
+/// Read it as an upper bound on how much of the head's time is memory. If the
+/// head streams `n` MB per token and this reports `b` MB/s, then at least
+/// `head_ms - 1000*n/b` is arithmetic, and no amount of shrinking the weights
+/// can touch it. That bound is what tells you whether to spend the next effort
+/// on bytes or on instructions.
+///
+/// Accumulates rather than using `read_volatile` per word: a volatile load per
+/// `u32` blocks the unrolling and pipelining the real head loop gets, and would
+/// understate bandwidth. `black_box` on the result is what stops the loop being
+/// deleted.
+pub fn probe_read_bandwidth(buf: &[u8]) -> f64 {
+    let words = buf.len() / 4;
+    let p = buf.as_ptr() as *const u32;
+    let t0 = unsafe { esp_timer_get_time() };
+    let mut acc: u32 = 0;
+    for i in 0..words {
+        // SAFETY: `i < words == buf.len()/4`, and `buf` is at least
+        // `words * 4` bytes, so every read is inside it. u32 has no
+        // alignment requirement this allocator can violate -- PSRAM
+        // allocations are at least word-aligned.
+        acc = acc.wrapping_add(unsafe { *p.add(i) });
+    }
+    let dt = unsafe { esp_timer_get_time() } - t0;
+    core::hint::black_box(acc);
+    if dt <= 0 {
+        return f64::NAN;
+    }
+    (words * 4) as f64 / dt as f64
 }

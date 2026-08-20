@@ -16,3 +16,17 @@ members = [
 # Workspace-wide release profile will be tuned here once we're benchmarking
 # the Rust build against the numbers already recorded in
 # reference-c/firmware/esp32_llm/README.md (102.9ms/step, 9.72 tok/s).
+
+# Match llm-firmware's own [profile.release] (opt-level 3 / fat LTO /
+# codegen-units 1). Without this the host build and the whole test suite ran
+# at Cargo's defaults -- no cross-crate inlining of llm_core into llm_host --
+# while the firmware it is meant to predict ran with LTO on. That is not a
+# cosmetic difference: measured on x86-64, the tensor.rs unpack rewrite is
+# worth ~4% without LTO and ~22% with it, because the win depends on LLVM
+# being able to inline matvec_range across the crate boundary and specialize
+# it. Benchmarking a kernel change in the un-inlined configuration would have
+# understated it by 5x.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1

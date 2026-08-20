@@ -27,14 +27,55 @@ either firmware drifts from them.
 
 ## Results
 
-| ms/token | input | attn | ffn | ple | head | total | tok/s |
-|---|---|---|---|---|---|---|---|
-| **C reference** | 4.4 | 42.9 | 6.9 | 8.5 | 57.1 | **119.8** | 8.20 |
-| **Rust** | 7.8 | 54.4 | 11.9 | 15.2 | 90.3 | **179.6** | 5.47 |
-| ratio | 1.77x | 1.27x | 1.72x | 1.79x | 1.58x | **1.50x** | |
-| absolute gap | +3.4 | +11.5 | +5.0 | +6.7 | **+33.2** | +59.8 | |
+<!-- BEGIN device-table (generated: scripts/plot_stages.py --inject) -->
 
-Both measured the same evening on the same board. C: 400 tokens in 48.78 s,
+| ms/token | input | attn | ffn | ple | head | stages | **wall** | tok/s |
+|---|---|---|---|---|---|---|---|---|
+| **C reference** | 4.4 | 42.9 | 6.9 | 8.5 | 57.1 | 119.8 | **122.0** | 8.20 |
+| **Rust, first run** | 10.6 | 66.7 | 15.8 | 20.4 | 193.8 | 307.3 | **311.5** | 3.21 |
+| **+ dual-core head, unroll** | 8.0 | 58.9 | 11.8 | 15.1 | 110.9 | 204.7 | **208.8** | 4.79 |
+| **+ wider caches** | 7.4 | 53.7 | 11.2 | 14.3 | 87.6 | 174.2 | **177.3** | 5.64 |
+| **Rust, before** | 7.8 | 54.4 | 11.9 | 15.2 | 94.6 | 183.9 | **187.2** | 5.34 |
+| **Rust, nibble LUT** | 6.6 | 50.8 | 10.1 | 12.7 | 98.0 | 178.2 | **181.6** | 5.51 |
+| **Rust, + KV layout** | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | 171.2 | **174.6** | 5.73 |
+| **+ int4 head** | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | 171.2 | **174.6** | 5.73 |
+| **+ 4 accumulators** | 6.6 | 47.0 | 10.1 | 12.7 | 81.3 | 157.7 | **161.0** | 6.21 |
+| **+ bias hoist** | 6.6 | 47.0 | 10.1 | 12.7 | 61.5 | 137.9 | **140.9** | 7.09 |
+| **+ dual-core matvec** | 3.9 | 40.2 | 6.2 | 7.5 | 61.6 | 119.4 | **122.7** | 8.15 |
+| **+ argmax/stdout** | 3.8 | 39.8 | 6.0 | 7.3 | 61.5 | 118.4 | **121.1** | 8.25 |
+| **+ argmax in head** | 3.9 | 40.0 | 6.1 | 7.5 | 61.5 | 119.0 | **119.0** | 8.40 |
+| **+ attn instrumented** | 3.9 | 39.0 | 6.2 | 7.6 | 61.9 | 118.6 | **118.5** | 8.43 |
+| **Rust, now** | 3.9 | 26.4 | 6.2 | 7.6 | 62.7 | 106.8 | **106.8** | 9.36 |
+| ratio vs C reference | 0.89x | 0.62x | 0.90x | 0.89x | 1.10x | 0.89x | **0.88x** | |
+| absolute gap | -0.5 | -16.5 | -0.7 | -0.9 | +5.6 | -13.0 | **-15.2** | |
+| **change this brought** | +0.0 | -12.6 | +0.0 | +0.0 | +0.8 | -11.8 | **-11.7** | |
+
+**`attn` broken down** — the sub-stages the five-stage profile hides. `qkv`/`proj` are the fp32 matvec that also drives `ffn` and `ple`; `core` is attention proper, the only part that grows with sequence position. The C reference has no equivalent instrumentation, so it is absent rather than zero.
+
+| attn ms/token | qkv | rope | core | proj | sum | both cores |
+|---|---|---|---|---|---|---|
+| **+ attn instrumented** | 7.8 | 0.14 | 28.3 | 2.7 | 38.9 | `qkv`, `proj` |
+| **Rust, now** | 7.9 | 0.15 | 15.6 | 2.7 | 26.3 | `qkv`, `proj`, `core` |
+
+**Rust is 14.2% faster per token than the C reference it was ported from** — 106.8 ms against 122.0, 9.36 tok/s against 8.20, on the same board with byte-identical output. It beats C on 4 of the 5 stages.
+
+<!-- END device-table -->
+
+`total` is the sum of the profiled stages; `tok/s` comes from wall clock, which
+runs 2–3 ms/token above that sum on both engines — token sampling, argmax and
+serial output sit outside the profiled stages. The two agree on deltas: wall
+went 187.2 → 181.6 ms/token across the nibble-LUT change, against the −5.7 ms
+the stage sum shows.
+
+This table and `png/benchmark-stages.svg` are both generated from
+[`benchmarks/device.toml`](./benchmarks/device.toml) by
+`scripts/plot_stages.py --inject`. Before that existed the chart was a
+hand-drawn PNG with no generator and the table was hand-maintained in two
+files, so both aged silently every time someone reflashed. Record a new run as
+its own `[run.<id>]` section rather than editing an existing one — the point is
+that what was measured, when, and against which commit survives.
+
+The C row and the first Rust row were measured the same evening on the same board. C: 400 tokens in 48.78 s,
 reproduced bit-identically across three independent runs (same total to
 0.01 s, same per-stage figures to 0.1 ms). Rust: 400 tokens in 73.07 s from
 `cargo run --release` on the current tree. Neither is quoted from anywhere.
@@ -52,6 +93,109 @@ implementations of the same math, including the dual-core int8-staged head,
 agreeing token for token on real silicon. Boot diagnostics agree too
 (`head staged int8: 2.54 MB`; PSRAM free 3141 KB for C, 3211 KB for Rust —
 different allocators, same model).
+
+## Where the time goes now
+
+Every stage except the head is faster than C, and the head is 1.08x. Outside
+the profiled stages there is now essentially nothing:
+
+```
+outside stages: argmax 0.00 | emit 0.03 | other 0.00 ms/token  (wall 119.0 vs forward 119.0)
+```
+
+It did not start there. It was `argmax 2.74`, and the fix was not a faster
+loop: the greedy pick was reading 25,353 logits back out of PSRAM, 101 KB at
+roughly half the measured bus rate, because a data-dependent branch per element
+leaves nothing to pipeline. Both cores already hold each logit in a register the
+moment `rows_range` computes it, so each now tracks the maximum over its own
+rows and the decode loop chooses between two candidates. Tie-breaking is
+identical — first-strictly-greater within a half, `hi > lo ? hi : lo` between
+halves, which yields the lower index on a tie exactly as a `0..n` scan does.
+
+**The C reference still pays that cost**: 122.0 ms wall against 119.8 profiled.
+Its `pick()` scans all 25,353 logits too. That 2.2 ms is most of the margin
+between the two engines, and it is the one place this port is not doing the same
+work as its reference — it is doing less of it, for the same output.
+
+What remains, in order of size: `attn` at 40.0 ms is a third of a token and has
+never been instrumented the way the head was; the fp32 `matvec_range` runs at
+~21 cycles/MAC against the head's 12.1 and carries the same single-accumulator
+chain the head shed, though fp32 reordering needs the tolerance
+`matvec_simd_tolerance.rs` has already measured.
+
+## Instrumentation
+
+Two things the firmware prints beyond the five-stage line, both added after the
+five stages proved too coarse twice in one day — once failing to separate a
+code-placement shift from a real regression, once failing to explain why
+halving the head's memory traffic changed nothing.
+
+**A PSRAM bandwidth probe**, at boot, over the head's own staged weights — same
+allocation, same direction, same cold-stream pattern, far larger than the data
+cache:
+
+```
+PSRAM read: 72 MB/s  (1.22 MB of head weights => 16.9 ms/token floor)
+```
+
+Read it as a floor. Streaming `n` MB at `b` MB/s cannot cost less than
+`1000n/b` ms, and whatever a stage spends above that floor is arithmetic no
+amount of compression will reach. This is the minimum useful part of
+`reference-c/firmware/bandwidth_bench/` (Phase 5, still unported) — enough to
+choose between attacking bytes and attacking instructions, which is the choice
+this project got wrong once.
+
+**Head sub-stage timers**, under the profile line:
+
+```
+head detail: quant 0.04 | own-half 61.4 | wait-worker 0.0 | worker-half 61.4
+```
+
+- `own + wait` should account for nearly all of the `head` figure.
+- `wait` near zero means the calling core is the slow half and the row split is
+  fine. `wait` large would mean the worker's half takes materially longer and
+  moving `split` off `rows / 2` is free throughput. It has measured 0.0 every
+  time, so the even row split is also an even time split — worth knowing, and
+  cheap to stop wondering about.
+- `worker` is the other half timed on the worker itself, so `wait` much larger
+  than `worker - own` would be scheduling latency rather than compute.
+- `quant` should be negligible (96 elements). It is 0.04.
+
+Cost: four `esp_timer_get_time` calls per token on the inference core, two on
+the worker, against stages measured in tens of milliseconds. Not feature-gated
+— the point is that it is on when someone reflashes and wonders where the time
+went.
+
+## Reproducibility and the layout tax
+
+**A given binary reproduces exactly on this board.** The C firmware was already
+known to (three runs, same total to 0.01 s, same per-stage figures to 0.1 ms);
+both Rust binaries in the table above were then re-run from a hard reset and
+did the same. One run per binary is therefore enough, and `--repeat`-style
+averaging buys nothing.
+
+The consequence is less comfortable, and it caught this project out once
+already. Because there is no run-to-run noise to absorb it, **a difference
+between two binaries in a stage neither of them touches is real.** `head` has
+now moved twice that way:
+
+| head | binary | what changed |
+|---|---|---|
+| 90.3 | pre-`c7f2ce7` | — |
+| 94.6 | `feat/ple-v2-header` | PLE\0 header parse, `out_vocab`; `head.rs` untouched |
+| 98.0 | `perf/nibble-lut` | two lookup tables, four reshaped loops; `head.rs` untouched |
+
+Neither commit changes a line the head executes. What they change is how much
+code and `.rodata` `llm-core` occupies, and the head streams 2.43 MB through a
+64 KB cache every token — a stage where instruction and data placement is
+worth several percent. Budget for it: an `llm-core` change that leaves the head
+alone can still cost the head 3–4 ms, and a change measured only on the stages
+it targets will overstate its net.
+
+The first reading of the 90.3 → 94.6 → 98.0 sequence here was thermal drift
+across back-to-back runs. It was not; the repeat runs killed that. Recorded
+because "the board was warming up" is the comfortable explanation and it was
+the wrong one.
 
 ## Reproducing
 
@@ -200,8 +344,14 @@ Two caveats on reading this table:
   *ratio* is sound; the absolute ms/token is not comparable to the table
   above.
 
-That the host ratio (1.47x) lands so close to the device's (1.50x) is
-**not yet explained and should not be assumed causal.** On the device, the
+**Resolved: it was coincidence.** The nibble-LUT change took the host from
+1.47x to 1.11x while the device moved 1.50x to ~1.49x — the two ratios came
+apart the moment anything changed, so their earlier agreement carried no
+information. The paragraph below is kept because the reasoning that raised the
+suspicion was right; the suspicion itself is now answered.
+
+That the host ratio (1.47x) landed so close to the device's (1.50x) was
+**never explained and should not have been assumed causal.** On the device, the
 head is 56% of the absolute gap and is bandwidth-bound; on the host it
 cannot be. The agreement may mean the shared fp32 matvec dominates both for
 the same reason, or it may be coincidence. Nothing here has isolated it
@@ -237,14 +387,17 @@ both firmwares' constants against the registry.
 
 ## Optimization history (Rust)
 
-| ms/token | input | attn | ffn | ple | head | total | tok/s |
-|---|---|---|---|---|---|---|---|
-| first run | 10.6 | 66.7 | 15.8 | 20.4 | 193.8 | 307.4 | 3.21 |
-| + dual-core, byte-pair unroll | 8.0 | 58.9 | 11.8 | 15.1 | 110.9 | 204.8 | 4.79 |
-| + wider caches | 7.4 | 53.7 | 11.2 | 14.3 | 87.6 | 174.2 | 5.64 |
+The full history is the generated table at the top of this file — it is the
+same measurements, from `benchmarks/device.toml`, and there is deliberately
+no second copy here. A hand-written duplicate lived at this spot until it
+went two runs stale, which is the whole argument for the generator: three
+of its rows (`first run`, `+ dual-core head, unroll`, `+ wider caches`)
+existed **only** here and have been migrated into `device.toml`, where they
+are flagged as migrated with `wall_ms` derived from `tok/s` rather than
+measured.
 
-All at 400 tokens / 18-token prompt, so comparable to each other and to the
-C row above. Three changes, in order of what they were worth:
+All rows are at 400 tokens / 18-token prompt, so they are comparable to each
+other and to the C reference. Three changes, in order of what they were worth:
 
 1. **The dual-core head split was not actually dual-core.** `head.rs` pins
    its worker to CPU0, faithfully copying the C reference's
@@ -264,15 +417,18 @@ C row above. Three changes, in order of what they were worth:
    110.9 to 87.6 ms — it streams 2.43 MB of PSRAM sequentially, exactly the
    access pattern a wider cache line helps.
 
-The current tree measures **179.6**, not that last row's 174.2. Two things
-landed since: `attention.rs`/`ops.rs` zip-based loops (an improvement when
-measured), and the `matvec_override` hook, which adds a branch to every
-matvec call. That hook has no shipping user yet, and its cost looks like
+Before the nibble-LUT row the tree measured **179.6**, not the wider-caches
+row's 174.2. Two things had landed in between: `attention.rs`/`ops.rs`
+zip-based loops (an improvement when measured), and the `matvec_override`
+hook, which adds a branch to every matvec call. That hook has no shipping user yet, and its cost looks like
 roughly 2 ms/token — but that has not been isolated by a clean before/after
 on one build, so treat it as a suspect rather than a measurement. Worth an
 A/B before anyone optimizes around it.
 
-**What is left is not a port bug.** Every stage is a line-for-line
+**What is left is not a port bug** — and the nibble-LUT row is evidence for
+that reading rather than against it: it did not fix a translation error, it
+removed per-element work the C compiler never had to do, and the output stayed
+bit-identical throughout. Every stage is a line-for-line
 translation of the same loop in `reference-c/firmware/common/llm.h`, and
 the host parity suite proves the arithmetic is bit-identical. The remaining
 gap is most likely GCC's Xtensa backend against LLVM's on scalar float and
@@ -281,13 +437,43 @@ S3's SIMD unit, not more flag-tuning.
 
 ## What to optimize next
 
-Two levers, ranked by what the measured table says.
+Ranked by what the measured table says, as of `Rust, now`:
 
-### 1. The fp32 matvec — worst ratios, scaffolding already in `main`
+| | ms/token | share of a token | vs C |
+|---|---|---|---|
+| **output head** | 62.7 | 59% | 1.10x — the only stage still behind |
+| fp32 matvec (`input` + `ffn` + `ple` + `qkv` + `proj`) | 28.3 | 26% | 0.89x |
+| attention `core` | 15.6 | 15% | not separately instrumented in C |
 
-`ple` (1.79x), `input` (1.77x) and `ffn` (1.72x) are furthest from parity,
-and all three run through `QT::matvec_range`, the fp32-dequantized-weight
-path. So do `qkv` and `attn_proj`. Together, +15.1 ms/token.
+The ordering has inverted since this section was written. The fp32 matvec was
+the top lever when `ple`/`input`/`ffn` sat at ~1.5x of C; they are now 0.89x
+and the head is 59% of a token on its own. **The head is the target**, and it
+is the one place where the remaining gap is a like-for-like instruction-count
+difference rather than a structural one: at 62.7 ms across two cores it runs
+~12.4 cycles per multiply-accumulate against C's ~11.3, so roughly 10% of the
+head is scheduling rather than work.
+
+A third item is now open that was not before — see
+[Is attention's `core` bandwidth-bound?](#is-attentions-core-bandwidth-bound)
+below. It is a measurement, not an optimization, and it is cheap.
+
+### The fp32 matvec — partly done; SIMD still open
+
+**Update.** `ple` (1.79x), `input` (1.77x) and `ffn` (1.72x) were the three
+furthest from parity, all running through `QT::matvec_range`. Two bit-exact
+changes to that function — a 16-entry nibble→f32 table replacing a per-element
+subtract-and-convert, and `zip`-driven steady-state loops replacing indexed
+ones — moved them to **1.49x / 1.50x / 1.46x**, and `attn` (which also routes
+`qkv` and `attn_proj` through it) from 1.27x to 1.18x. Together −9.1 ms/token,
+−10.2% across those four stages, output bit-identical.
+
+That was the cheap half, and it did not need SIMD. The rest of this section —
+the ESP32-S3's PIE vector unit — is still open and still the larger prize.
+
+For the record, the pre-change framing: `ple` (1.79x), `input` (1.77x) and
+`ffn` (1.72x) were furthest from parity, and all three run through
+`QT::matvec_range`, the fp32-dequantized-weight path. So do `qkv` and
+`attn_proj`. Together, +15.1 ms/token.
 
 > An earlier version of this section named `QT::matvec_int8_activations` as
 > the SIMD target. The firmware never calls it — like the C sketch, it does
@@ -325,10 +511,62 @@ first, and benchmark. An FFI call per row has real overhead at these row
 lengths (66–128 elements), so this is **not** a guaranteed win — it needs a
 before/after on hardware, not an assumption that SIMD is faster.
 
-### 2. The output head — biggest absolute gap, but diagnose first
+### The output head — the arithmetic fixes are done; the diagnosis was the whole story
 
-At +33.2 ms/token the head is **56% of the entire Rust-vs-C gap**, far more
-than any other stage in absolute terms, despite a middling 1.58x ratio. It
+**Resolved. The head went 94.6 -> 61.5 ms, 1.66x -> 1.08x of C.** What follows
+is kept because the reasoning that got there is reusable and the reasoning that
+preceded it was wrong.
+
+This section used to say the head was bandwidth-bound, on the strength of the
+`+ wider caches` change moving it 21% — more than any change had moved any
+stage. Acting on that produced the int4 staging, which halved what the head
+streams (2.54 MB -> 1.32 MB), returned 1.2 MB of PSRAM, and moved the stage
+**0.0 ms**.
+
+The null result is what forced the stage to be instrumented, and the
+instruments answered in one run:
+
+```
+PSRAM read: 72 MB/s  (1.22 MB of head weights => 16.9 ms/token floor)
+head detail: quant 0.04 | own-half 90.9 | wait-worker 0.0 | worker-half 90.9
+```
+
+`wait-worker 0.0` with both halves equal means each core independently
+completes its rows in 90.9 ms while the other does the same — so aggregate
+throughput was 1.22 MB in 91 ms, **13.4 MB/s against 72 MB/s available**. The
+head was using 19% of its own bandwidth. If memory had been the constraint,
+two cores could not both have hit 90.9. It was compute-bound the whole time,
+and `+ wider caches` helped for some other reason.
+
+What was actually wrong was two operations per element in a loop that runs
+2.43M times per token:
+
+1. **One accumulator.** `acc += a[i] * b[i]` makes every add wait for the
+   previous one. Four independent accumulators: 91.0 -> 81.3. Bit-exact —
+   `i32` addition is associative.
+2. **A subtract and a table load that should not have existed.** Codes are
+   stored biased, and `sum (c-8)a == sum ca - 8 sum a`, where `sum a` is
+   identical for all 25,353 rows. Hoisting it deletes the subtract; deleting
+   the subtract also deletes the `NIBBLE_I8` lookup that had been standing in
+   for it. 81.3 -> 61.5. Also exact — the identity holds over the integers.
+
+That second one is worth dwelling on. `NIBBLE_I8` was introduced alongside
+`NIBBLE_F32`, where the table genuinely wins: it replaces an integer-to-float
+*conversion* with a load, measured -24% on the host head. On the integer path
+it replaced a *subtract* with a load, which is a worse instruction on any
+machine. The pattern was copied without re-deriving whether it applied.
+
+Neither operation was visible at five-stage resolution. Both were obvious once
+the stage was split four ways. **The instrument was worth more than any guess
+about the stage.**
+
+### 2b. Historical: the output head — biggest absolute gap, but diagnose first
+
+At +40.9 ms/token the head is now **roughly two-thirds of the entire
+Rust-vs-C gap** — it was 56% before the nibble-LUT change shrank everything
+else — and far more than any other stage in absolute terms. (Its figure was marked
+provisional at the time; it no longer is, and the run it referred to is
+`+ wider caches` in the generated table.) It
 is already int8-staged and split across both cores, and it streams 2.43 MB
 of PSRAM per token. The `+ wider caches` change moved it more than any
 other stage (-21%), pointing at memory bandwidth rather than instruction
@@ -337,11 +575,29 @@ is *before* assuming SIMD is the answer —
 `reference-c/firmware/bandwidth_bench/` exists for exactly this measurement
 and has not been ported (Phase 5).
 
-### Not a priority: `attn` (1.27x)
+### Is attention's `core` bandwidth-bound?
 
-Closest stage to parity. Earlier revisions recommended it as the top target
-on the strength of a 2.10x figure that was a benchmark artifact — see
-[Why matched settings matter](#why-matched-settings-matter).
+Open, and cheap to settle. Splitting the four attention heads two-per-core
+took `core` from 28.3 to 15.6 ms. A perfect halving would be 14.15, plus the
+0.1 ms of measured sync = 14.25. **1.35 ms, 9.5%, did not come back**, and
+this run cannot say which of two causes it is:
 
-Both levers need real ESP-IDF hardware to benchmark. Good first issues for
+- **Bus contention.** Both cores now scan the same KV cache at the same time.
+  The head was shown to be compute-bound precisely because two cores each
+  independently completed their half at the same speed as one — attention may not have
+  that property, since `core` reads far more memory per unit of arithmetic.
+- **The layout tax.** This binary's boot-time PSRAM probe reads **68 MB/s
+  against the previous binary's 72** — the same probe, the same buffer, the
+  same code, before generation starts. That is a 5.6% slower memory path from
+  placement alone, and `head` moved +0.8 ms in the same binary without
+  `head.rs` changing. Most of the 9.5% may simply be this.
+
+The experiment that separates them: run `psram::probe_read_bandwidth` on both
+cores simultaneously and compare against one core. If aggregate throughput
+does not scale, attention is contending and the fix is a smaller working set
+(fp16 KV cache halves it); if it does scale, the shortfall was placement and
+there is nothing to chase. `reference-c/firmware/bandwidth_bench/` is the
+C-side prior art and is still unported (Phase 5).
+
+All three items need real ESP-IDF hardware to benchmark. Good first issues for
 a contributor who has a board — see [CONTRIBUTING.md](./CONTRIBUTING.md).

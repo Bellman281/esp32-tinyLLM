@@ -315,7 +315,7 @@ fn dispatch_matvec(
 /// dual-core int8-staged output head (`Model.head_matvec` in the C code),
 /// see `llm_forward_with_head_override` below.
 pub fn llm_forward(model: &Model, token: usize, pos: usize, s: &mut Scratch) {
-    llm_forward_impl(model, token, pos, s, None, None, None);
+    llm_forward_impl(model, token, pos, s, None, None, None, None);
 }
 
 /// Same decode step as `llm_forward`, but the final output-head matvec is
@@ -337,7 +337,7 @@ pub fn llm_forward_with_head_override(
     s: &mut Scratch,
     head: &mut dyn FnMut(&[f32], &mut [f32]),
 ) {
-    llm_forward_impl(model, token, pos, s, Some(head), None, None);
+    llm_forward_impl(model, token, pos, s, Some(head), None, None, None);
 }
 
 /// Same decode step as `llm_forward_with_head_override`, plus `llm.h`'s
@@ -359,7 +359,7 @@ pub fn llm_forward_profiled(
     now: &mut dyn FnMut() -> u64,
     prof: &mut Profile,
 ) {
-    llm_forward_impl(model, token, pos, s, Some(head), None, Some((now, prof)));
+    llm_forward_impl(model, token, pos, s, Some(head), None, None, Some((now, prof)));
 }
 
 /// Same decode step as `llm_forward_profiled`, plus `matvec_override`:
@@ -402,6 +402,68 @@ pub fn llm_forward_profiled_with_matvec_override(
         s,
         Some(head),
         Some(matvec_override),
+        None,
+        Some((now, prof)),
+    );
+}
+
+/// `llm_forward` with only the attention heads handed out -- no head or
+/// matvec override, no profiling. The single-hook form of
+/// `llm_forward_profiled_with_overrides` below, which is where the contract
+/// on `attn_heads` is documented.
+///
+/// This is what `llm-host/tests/attn_split.rs` runs against plain
+/// `llm_forward`: because nothing else is overridden, a difference in the
+/// logits can only come from how the heads were divided.
+pub fn llm_forward_with_attn_override(
+    model: &Model,
+    token: usize,
+    pos: usize,
+    s: &mut Scratch,
+    attn_heads: &mut dyn FnMut(attention::HeadsJob),
+) {
+    llm_forward_impl(model, token, pos, s, None, None, Some(attn_heads), None);
+}
+
+/// `llm_forward_profiled_with_matvec_override` plus `attn_heads`: the
+/// per-head attention work for each layer, handed out as an
+/// `attention::HeadsJob` after this position's k/v are already in the cache.
+///
+/// The matvec hook cannot reach attention -- attention is not a matvec -- and
+/// on the ESP32-S3 that left `attn`'s core loop at 28.3 ms/token, 24% of a
+/// token, running on one LX7 while the worker task sat blocked, which is
+/// exactly the situation the matvec hook was added to fix for everything else.
+///
+/// Heads are independent: each reads the whole (already stored) cache and
+/// writes only its own `head_dim` slice of `att_out`, so an override that
+/// divides them across cores is **bit-exact** -- no dot product changes and
+/// nothing reorders. That is the difference from `matvec_override`, which is
+/// explicitly allowed to be lossy (see above); this one is not, and
+/// `llm-host/tests/attn_split.rs` holds every split point of the shipped
+/// model to bit-for-bit agreement with the unsplit path.
+///
+/// An override must run **every** head in `0..job.n_heads`. Nothing else
+/// writes `att_out`, so a range left out is a stale buffer, not a zero.
+#[allow(clippy::too_many_arguments)]
+pub fn llm_forward_profiled_with_overrides(
+    model: &Model,
+    token: usize,
+    pos: usize,
+    s: &mut Scratch,
+    head: &mut dyn FnMut(&[f32], &mut [f32]),
+    matvec_override: &mut dyn FnMut(&QT, &[f32], &mut [f32]),
+    attn_heads: &mut dyn FnMut(attention::HeadsJob),
+    now: &mut dyn FnMut() -> u64,
+    prof: &mut Profile,
+) {
+    llm_forward_impl(
+        model,
+        token,
+        pos,
+        s,
+        Some(head),
+        Some(matvec_override),
+        Some(attn_heads),
         Some((now, prof)),
     );
 }
@@ -418,9 +480,13 @@ pub fn llm_forward_with_matvec_override(
     head: &mut dyn FnMut(&[f32], &mut [f32]),
     matvec_override: &mut dyn FnMut(&QT, &[f32], &mut [f32]),
 ) {
-    llm_forward_impl(model, token, pos, s, Some(head), Some(matvec_override), None);
+    llm_forward_impl(model, token, pos, s, Some(head), Some(matvec_override), None, None);
 }
 
+// Four optional hooks plus the model/token/pos/scratch it always needs. The
+// public wrappers above are the argument-count-friendly faces of this; adding
+// a fifth would be the point to bundle them into an `Overrides` struct.
+#[allow(clippy::too_many_arguments)]
 fn llm_forward_impl(
     model: &Model,
     token: usize,
@@ -428,6 +494,7 @@ fn llm_forward_impl(
     s: &mut Scratch,
     mut head: Option<&mut dyn FnMut(&[f32], &mut [f32])>,
     mut matvec_override: Option<&mut dyn FnMut(&QT, &[f32], &mut [f32])>,
+    mut attn_override: Option<&mut dyn FnMut(attention::HeadsJob)>,
     mut prof: Option<(&mut dyn FnMut() -> u64, &mut Profile)>,
 ) {
     // `last_t` tracks the timestamp at the previous stage boundary --
@@ -483,8 +550,25 @@ fn llm_forward_impl(
         let layer = model.layer(l);
 
         // ---- attention
+        //
+        // Split four ways when profiling. `attn` is a third of a token and was
+        // the last stage reported as one number; the four parts have different
+        // levers (see `Profile::attn_detail_ms_per_token`), and guessing which
+        // one dominates is exactly what cost flashes on the head. Each `sub`
+        // below reads the clock only when a `Profile` was supplied.
+        let mut sub_t = last_t;
+        macro_rules! sub {
+            ($field:ident) => {
+                if let Some((now, p)) = prof.as_mut() {
+                    let t = now();
+                    p.$field += t - sub_t;
+                    sub_t = t;
+                }
+            };
+        }
         ops::rmsnorm(s.x, layer.attn_norm, d, s.h);
         dispatch_matvec(&mut matvec_override, &layer.qkv, s.h, &mut s.qkv[..3 * d], s.iq);
+        sub!(attn_qkv_us);
         {
             let (q, rest) = s.qkv[..3 * d].split_at_mut(d);
             let (k, v) = rest.split_at_mut(d);
@@ -492,17 +576,41 @@ fn llm_forward_impl(
                 rope::apply(&mut q[hh * dh..hh * dh + dh], s.rope_cos, s.rope_sin, dh);
                 rope::apply(&mut k[hh * dh..hh * dh + dh], s.rope_cos, s.rope_sin, dh);
             }
+            sub!(attn_rope_us);
             let seq = cfg.seq_len;
             let layer_kc = &mut s.kcache[l * seq * d..(l + 1) * seq * d];
             let layer_vc = &mut s.vcache[l * seq * d..(l + 1) * seq * d];
-            attention::forward(
-                q, k, v, layer_kc, layer_vc, s.att, s.scores, pos, d, h_heads, dh,
-            );
+            debug_assert_eq!(h_heads * dh, d);
+            attention::store_kv(k, v, layer_kc, layer_vc, pos, h_heads, dh, seq);
+            // The heads are the part worth handing out: `store_kv` is
+            // `n_heads` copies of `head_dim` floats, the heads are
+            // `n_heads * (pos+1)` dot products over the same cache.
+            match attn_override.as_deref_mut() {
+                Some(f) => f(attention::HeadsJob {
+                    q,
+                    kcache_layer: layer_kc,
+                    vcache_layer: layer_vc,
+                    att_out: s.att,
+                    pos,
+                    n_heads: h_heads,
+                    head_dim: dh,
+                    seq_len: seq,
+                }),
+                None => attention::heads(
+                    q, layer_kc, layer_vc, s.att, s.scores, pos, dh, seq, 0, h_heads,
+                ),
+            }
         }
+        sub!(attn_core_us);
         dispatch_matvec(&mut matvec_override, &layer.attn_proj, s.att, s.h, s.iq);
         for i in 0..d {
             s.x[i] += s.h[i];
         }
+        sub!(attn_proj_us);
+        // The last `sub!` advances `sub_t` and nothing reads it afterwards.
+        // Consuming it here is cheaper than an `#[allow]`, which would have to
+        // sit on the macro expansion rather than the binding to take effect.
+        let _ = sub_t;
 
         if let Some((now, p)) = prof.as_mut() {
             let t = now();

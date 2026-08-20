@@ -27,7 +27,10 @@ mod psram;
 mod vocab;
 
 use esp_idf_svc::hal::sys::esp_timer_get_time;
-use llm_core::{llm_forward_profiled, llm_forward_with_head_override, Model, Profile};
+use llm_core::{
+    llm_forward_profiled_with_overrides, llm_forward_with_head_override, HeadsJob, Model, Profile,
+    QT,
+};
 use std::io::Write;
 use std::time::Duration;
 
@@ -289,15 +292,68 @@ fn main() {
         }
     };
 
+    // Whether attention will actually use both cores, said once at boot rather
+    // than left to be inferred from a zero in the profile -- a fallback and a
+    // perfectly balanced split both print `wait-worker 0.0`.
+    if model.cfg.n_heads >= 2 && model.cfg.seq_len <= head::MAX_ATTN_SEQ {
+        log::info!(
+            "attn heads split {}/{} across cores",
+            model.cfg.n_heads / 2,
+            model.cfg.n_heads - model.cfg.n_heads / 2
+        );
+    } else {
+        log::warn!(
+            "attn heads NOT split (n_heads={} seq_len={} > MAX_ATTN_SEQ={}): single core",
+            model.cfg.n_heads,
+            model.cfg.seq_len,
+            head::MAX_ATTN_SEQ
+        );
+    }
+
     let mut scratch = psram::alloc_scratch_psram(&model.cfg);
-    println!("PSRAM free after alloc: {} KB\n", psram::free_psram_bytes() / 1024);
+    println!("PSRAM free after alloc: {} KB", psram::free_psram_bytes() / 1024);
+
+    // One cold sequential pass over the staged head weights -- the same buffer,
+    // direction and access pattern the head uses every token, and far larger
+    // than the data cache, so nothing is reused. This is the minimum useful
+    // part of reference-c/firmware/bandwidth_bench/ and it converts "the head
+    // is probably memory-bound" into a bound: at `bw` MB/s, streaming `n` MB
+    // per token cannot cost less than 1000*n/bw ms, and whatever the head
+    // spends above that is arithmetic that shrinking the weights will never
+    // reach. Staging the head as int4 halved `n` and moved the head by 0.0 ms,
+    // which is the observation this line exists to explain.
+    {
+        let (bytes, bw) = head.probe_weight_bandwidth();
+        println!(
+            "PSRAM read: {:.0} MB/s  ({:.2} MB of head weights => {:.1} ms/token floor)",
+            bw,
+            bytes as f64 / 1e6,
+            bytes as f64 / bw / 1000.0
+        );
+    }
+    println!();
     let _ = std::io::stdout().flush();
 
     // The override closure IS `Model.head_matvec` from the C reference --
     // see head::stage_and_spawn's doc comment for why this port wires it
     // in as a closure parameter instead of a function-pointer struct
     // field.
+    // Locked once for the whole run. See `emit`.
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
     let mut head_matvec = |x: &[f32], y: &mut [f32]| head.matvec(x, y);
+    // Every NON-head matvec also goes to both cores. The hook has shipped
+    // since Phase 3 with no user -- it was written for esp-dsp, and a
+    // dual-core row split needs the same shape. input/attn/ffn/ple were 55% of
+    // a token running on one core with the worker parked; splitting by rows is
+    // bit-exact (llm-host/tests/matvec_split.rs asserts every split point).
+    let mut split_matvec = |t: &QT, x: &[f32], y: &mut [f32]| head.matvec_parallel(t, x, y);
+    // The same worker, a third kind of job. `matvec_override` cannot reach
+    // attention -- attention is not a matvec -- which left `attn`'s core loop
+    // as the largest single-core stage once the matvecs were split. See
+    // `Head::attn_parallel`.
+    let mut split_attn = |job: HeadsJob| head.attn_parallel(job);
 
     let prompt_ids = if STDIN_PROMPT {
         read_prompt_ids()
@@ -314,7 +370,7 @@ fn main() {
 
     for &t in prompt_ids.iter() {
         tok = t;
-        emit(tok);
+        emit(&mut out, tok);
         llm_forward_with_head_override(&model, tok, pos, &mut scratch, &mut head_matvec);
         pos += 1;
         // The C reference doesn't feed the watchdog here either (see
@@ -338,35 +394,47 @@ fn main() {
     // cache is empty/growing in a way steady-state decode isn't, so C
     // deliberately excludes it from the averaged breakdown too.
     let mut prof = Profile::default();
+    head.profile_reset(); // same boundary, same reason -- exclude priming
     let t_start = unsafe { esp_timer_get_time() };
     let mut decode_us: i64 = 0;
     let mut decoded = 0usize;
+    // The remainder outside the profiled stages, split. Wall clock minus the
+    // five stages is ~3 ms/token and had never been attributed to anything.
+    let mut argmax_us: i64 = 0;
+    let mut emit_us: i64 = 0;
 
     for step in 0..N_GENERATE {
         if pos >= model.cfg.seq_len {
             break;
         }
-        // Greedy: argmax over the trained vocab only (NOT model.cfg.vocab
-        // -- see head::stage_and_spawn's doc comment on why rows at/above
-        // vocab_n in s.logits are never written and must not be scored).
-        let mut best = 0usize;
-        let mut bv = f32::NEG_INFINITY;
-        for v in 0..vocab_n {
-            if scratch.logits[v] > bv {
-                bv = scratch.logits[v];
-                best = v;
-            }
-        }
-        tok = best;
-        emit(tok);
+        // Greedy pick.
+        // No scan. Both cores tracked the maximum over their own rows while
+        // computing the logits, so this reads two candidates instead of
+        // 25,353 floats back out of PSRAM. Same token either way -- see
+        // `Head::last_argmax` for why the tie-breaking is identical to a
+        // front-to-back scan.
+        //
+        // `vocab_n` is not passed here because the head was already staged
+        // with `rows = vocab_n`, so rows at or above it were never computed
+        // and cannot be the maximum. That is the same invariant the old scan
+        // relied on, enforced at staging time instead of at pick time.
+        let a0 = unsafe { esp_timer_get_time() };
+        tok = head.last_argmax();
+        let a1 = unsafe { esp_timer_get_time() };
+        emit(&mut out, tok);
+        let a2 = unsafe { esp_timer_get_time() };
+        argmax_us += a1 - a0;
+        emit_us += a2 - a1;
 
         let d0 = unsafe { esp_timer_get_time() };
-        llm_forward_profiled(
+        llm_forward_profiled_with_overrides(
             &model,
             tok,
             pos,
             &mut scratch,
             &mut head_matvec,
+            &mut split_matvec,
+            &mut split_attn,
             &mut || unsafe { esp_timer_get_time() as u64 },
             &mut prof,
         );
@@ -402,6 +470,47 @@ fn main() {
             "profile ms/token: input {input:.1} | attn {attn:.1} | ffn {ffn:.1} | ple {ple:.1} | head {head:.1}"
         );
     }
+    // attn is a third of a token and was the last stage reported as one
+    // number. qkv/proj are the same fp32 matvec that drives ffn and ple; core
+    // is the attention proper and the only part that grows with sequence
+    // length, since it scans the KV cache for every position so far.
+    if let Some([qkv, rope, core, proj]) = prof.attn_detail_ms_per_token() {
+        println!(
+            "  attn detail:    qkv {qkv:.1} | rope {rope:.2} | core {core:.1} | proj {proj:.1}"
+        );
+    }
+    // The head is ~52% of a token, so it gets its own breakdown. `own + wait` should account for nearly all of the `head`
+    // figure above; see Head::profile_ms_per_token for how to read the rest.
+    if let Some([quant, own, wait, worker]) = head.profile_ms_per_token() {
+        println!(
+            "  head detail:    quant {quant:.2} | own-half {own:.1} | wait-worker {wait:.1} | worker-half {worker:.1}"
+        );
+    }
+    // Sync cost of splitting the non-head matvecs. `wait` is the sum of every
+    // block on the worker across ~43 matvecs per token: it is the price the
+    // split pays, and the thing that decides whether it was worth paying.
+    if let Some((calls, wait)) = head.matvec_profile() {
+        println!("  split matvecs:  {calls:.0} calls/token | wait-worker {wait:.1} ms/token");
+    }
+    // Same for attention's heads: one round trip per layer instead of per
+    // matvec, so the sync cost should be roughly a seventh of the line above.
+    // `own + wait` is what the `core` figure in `attn detail` is made of.
+    if let Some((calls, own, wait)) = head.attn_profile() {
+        println!(
+            "  split attn:     {calls:.0} calls/token | own-heads {own:.1} | wait-worker {wait:.1} ms/token"
+        );
+    }
+    if decoded > 0 {
+        let n = decoded as f64 * 1000.0;
+        let stages = decode_us as f64 / n;
+        let wall = total_us as f64 / n;
+        println!(
+            "  outside stages: argmax {:.2} | emit {:.2} | other {:.2} ms/token  (wall {wall:.1} vs forward {stages:.1})",
+            argmax_us as f64 / n,
+            emit_us as f64 / n,
+            wall - stages - (argmax_us + emit_us) as f64 / n
+        );
+    }
     let _ = std::io::stdout().flush();
 
     // Matches C's `void loop() { delay(10000); }` -- setup() (this whole
@@ -418,9 +527,13 @@ fn main() {
 /// 4's territory). This port always blocks on the write for now; revisit
 /// alongside Phase 4's display module, when running without an attached
 /// USB host becomes a real scenario instead of a hypothetical one.
-fn emit(tok: usize) {
+/// Takes the already-locked handle rather than calling `std::io::stdout()`
+/// itself. That call returns a handle whose every `write_all`/`flush` takes a
+/// reentrant lock, so doing it per token paid for two lock acquisitions 400
+/// times for no reason. C's `emit` writes to a bare `FILE *`. The flush stays
+/// -- see below.
+fn emit<W: Write>(out: &mut W, tok: usize) {
     if let Some(bytes) = vocab::decode(tok) {
-        let mut out = std::io::stdout();
         let _ = out.write_all(bytes);
         // Explicit flush, added after the first on-hardware run: without it,
         // every token's bytes just accumulate in stdout's internal buffer
