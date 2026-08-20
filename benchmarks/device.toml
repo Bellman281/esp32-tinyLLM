@@ -4,6 +4,9 @@
 # stale in the other. That has already happened once in this repo's history:
 # see BENCHMARKING.md's "Why matched settings matter".
 #
+# Runs appear in the table and chart in FILE ORDER, which is chronological --
+# so a migrated historical run goes in its place in the sequence, not at the end.
+#
 # ADD a [run.<id>] section per measurement. Do NOT edit an existing run to
 # "update" it — add a new one carrying its own commit and date, so the record of
 # what was measured, when, and against which tree survives. Mark a run
@@ -42,6 +45,48 @@ ple     = 8.5
 head    = 57.1
 wall_ms = 122.0
 tok_s   = 8.20
+
+[run.rust-first]
+label   = "Rust, first run"
+engine  = "rust"
+date    = "2026-08-12"
+commit  = "pre-dates this file; migrated from BENCHMARKING.md's hand-written optimization history"
+note    = "MIGRATED, not re-measured. This row and the two below were recorded in a hand-written table in BENCHMARKING.md before benchmarks/device.toml existed, and were the only copy of them anywhere. Their per-stage figures are as published; wall_ms is DERIVED as 1000/tok_s rather than read off a wall clock, because the original table recorded the profiled sum and tok/s but not the wall figure -- so it carries only the three significant figures tok_s had, and the stages/wall spread for these three rows is not independent evidence of anything. Settings match every other row (400 tokens / 18-token prompt)."
+input   = 10.6
+attn    = 66.7
+ffn     = 15.8
+ple     = 20.4
+head    = 193.8
+wall_ms = 311.5
+tok_s   = 3.21
+
+[run.rust-dualcore-head]
+label   = "+ dual-core head, unroll"
+engine  = "rust"
+date    = "2026-08-14"
+commit  = "pre-dates this file; migrated from BENCHMARKING.md"
+note    = "MIGRATED, not re-measured; wall_ms derived as 1000/tok_s. See [run.rust-first]."
+input   = 8.0
+attn    = 58.9
+ffn     = 11.8
+ple     = 15.1
+head    = 110.9
+wall_ms = 208.8
+tok_s   = 4.79
+
+[run.rust-caches]
+label   = "+ wider caches"
+engine  = "rust"
+date    = "2026-08-15"
+commit  = "pre-dates this file; migrated from BENCHMARKING.md"
+note    = "MIGRATED, not re-measured; wall_ms derived as 1000/tok_s. See [run.rust-first]. This is the run BENCHMARKING.md read as evidence the head was bandwidth-bound (-21% on the head, more than any change had moved any stage). That reading was wrong -- see [run.rust-lanes] -- and the head figure here, 87.6, is also lower than the 94.6 measured for [run.rust-before] one commit later, which is the layout tax rather than a regression."
+input   = 7.4
+attn    = 53.7
+ffn     = 11.2
+ple     = 14.3
+head    = 87.6
+wall_ms = 177.3
+tok_s   = 5.64
 
 [run.rust-before]
 label   = "Rust, before"
@@ -155,7 +200,7 @@ wall_ms = 121.1
 tok_s   = 8.25
 
 [run.rust-argmax]
-label   = "Rust, now"
+label   = "+ argmax in head"
 engine  = "rust"
 date    = "2026-08-20"
 commit  = "perf(head): take the argmax where the logits are made"
@@ -167,3 +212,22 @@ ple     = 7.5
 head    = 61.5
 wall_ms = 119.0
 tok_s   = 8.40
+
+[run.rust-attn-instr]
+label   = "+ attn instrumented"
+engine  = "rust"
+date    = "2026-08-20"
+commit  = "instrument attn: split it four ways (56895f7)"
+note    = "Instrumentation only -- no arithmetic changed. Recorded because it is the baseline the head split is measured against, and because it is 0.5 ms faster than the run before it in stages nothing touched (attn 40.0 -> 39.0, head 61.5 -> 61.9): the layout tax again, in both directions at once. Skipping it would have credited that 0.5 ms to the next change. The breakdown it bought -- core 28.3, 24% of a token, single-core -- is what identified the last stage running on one LX7."
+input   = 3.9
+attn    = 39.0
+ffn     = 6.2
+ple     = 7.6
+head    = 61.9
+wall_ms = 118.5
+tok_s   = 8.43
+attn_qkv  = 7.8
+attn_rope = 0.14
+attn_core = 28.3
+attn_proj = 2.7
+attn_dual = "qkv proj"

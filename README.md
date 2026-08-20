@@ -5,7 +5,7 @@
 The ESP32-S3 has 512 KB of SRAM. This model has 28.9M parameters. It fits because
 ~25M of them live in a flash-mapped Per-Layer Embedding table (Gemma 3n's trick,
 three orders of magnitude down) and the rest are 4-bit quantized. It writes short
-stories at ~9.5 tok/s.
+stories at 8.4 tok/s — see the measured table below.
 
 This repo is a ground-up Rust port of the inference engine, ported function for
 function from [slvDev/esp32-ai](https://github.com/slvDev/esp32-ai)'s C
@@ -58,6 +58,9 @@ word.
 | ms/token | input | attn | ffn | ple | head | stages | **wall** | tok/s |
 |---|---|---|---|---|---|---|---|---|
 | **C reference** | 4.4 | 42.9 | 6.9 | 8.5 | 57.1 | 119.8 | **122.0** | 8.20 |
+| **Rust, first run** | 10.6 | 66.7 | 15.8 | 20.4 | 193.8 | 307.3 | **311.5** | 3.21 |
+| **+ dual-core head, unroll** | 8.0 | 58.9 | 11.8 | 15.1 | 110.9 | 204.7 | **208.8** | 4.79 |
+| **+ wider caches** | 7.4 | 53.7 | 11.2 | 14.3 | 87.6 | 174.2 | **177.3** | 5.64 |
 | **Rust, before** | 7.8 | 54.4 | 11.9 | 15.2 | 94.6 | 183.9 | **187.2** | 5.34 |
 | **Rust, nibble LUT** | 6.6 | 50.8 | 10.1 | 12.7 | 98.0 | 178.2 | **181.6** | 5.51 |
 | **Rust, + KV layout** | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | 171.2 | **174.6** | 5.73 |
@@ -66,32 +69,31 @@ word.
 | **+ bias hoist** | 6.6 | 47.0 | 10.1 | 12.7 | 61.5 | 137.9 | **140.9** | 7.09 |
 | **+ dual-core matvec** | 3.9 | 40.2 | 6.2 | 7.5 | 61.6 | 119.4 | **122.7** | 8.15 |
 | **+ argmax/stdout** | 3.8 | 39.8 | 6.0 | 7.3 | 61.5 | 118.4 | **121.1** | 8.25 |
-| **Rust, now** | 3.9 | 40.0 | 6.1 | 7.5 | 61.5 | 119.0 | **119.0** | 8.40 |
-| ratio vs C reference | 0.89x | 0.93x | 0.88x | 0.88x | 1.08x | 0.99x | **0.98x** | |
-| absolute gap | -0.5 | -2.9 | -0.8 | -1.0 | +4.4 | -0.8 | **-3.0** | |
-| **change this brought** | +0.1 | +0.2 | +0.1 | +0.2 | +0.0 | +0.6 | **-2.1** | |
+| **+ argmax in head** | 3.9 | 40.0 | 6.1 | 7.5 | 61.5 | 119.0 | **119.0** | 8.40 |
+| **+ attn instrumented** | 3.9 | 39.0 | 6.2 | 7.6 | 61.9 | 118.6 | **118.5** | 8.43 |
+| ratio vs C reference | 0.89x | 0.91x | 0.90x | 0.89x | 1.08x | 0.99x | **0.97x** | |
+| absolute gap | -0.5 | -3.9 | -0.7 | -0.9 | +4.8 | -1.2 | **-3.5** | |
+| **change this brought** | +0.0 | -1.0 | +0.1 | +0.1 | +0.4 | -0.4 | **-0.5** | |
+
+**`attn` broken down** — the sub-stages the five-stage profile hides. `qkv`/`proj` are the fp32 matvec that also drives `ffn` and `ple`; `core` is attention proper, the only part that grows with sequence position. The C reference has no equivalent instrumentation, so it is absent rather than zero.
+
+| attn ms/token | qkv | rope | core | proj | sum | both cores |
+|---|---|---|---|---|---|---|
+| **+ attn instrumented** | 7.8 | 0.14 | 28.3 | 2.7 | 38.9 | `qkv`, `proj` |
+
+**Rust is 3.0% faster per token than the C reference it was ported from** — 118.5 ms against 122.0, 8.43 tok/s against 8.20, on the same board with byte-identical output. It beats C on 4 of the 5 stages.
 
 <!-- END device-table -->
-
-Everything above — table and chart — is generated from
-[`benchmarks/device.toml`](./benchmarks/device.toml) by `scripts/plot_stages.py`,
-so a re-measurement updates both at once and they cannot drift apart. Add a run,
-re-run the script; never hand-edit a figure here.
-
-**The Rust engine is now faster than the C implementation it was ported from**, on
-the same board, with byte-identical output: 400 tokens in 47.60 s against C's
-48.78 s, 8.40 tok/s against 8.20 — 2.4% faster per token. It beats C on four of
-the five stages; the output head is the one still behind, at 1.08x.
 
 The `stages` column is the profiled sum and `wall` is what a user experiences.
 They differ by whatever runs outside the profiled stages: 2.2 ms/token for the
 C reference, 0.03 for Rust since the greedy pick moved into the head.
 
-Everything above is measured on hardware and generated from
-[`benchmarks/device.toml`](./benchmarks/device.toml) by `scripts/plot_stages.py`,
-so a re-measurement updates the table and the chart together and they cannot
-drift apart. Add a run, re-run the script; never hand-edit a figure here.
-Methodology and per-lever detail: [BENCHMARKING.md](./BENCHMARKING.md).
+Everything above — table, sentence and chart — is measured on hardware and
+generated from [`benchmarks/device.toml`](./benchmarks/device.toml) by
+`scripts/plot_stages.py`, so a re-measurement updates all of them together and
+they cannot drift apart. Add a run, re-run the script; never hand-edit a figure
+here. Methodology and per-lever detail: [BENCHMARKING.md](./BENCHMARKING.md).
 
 ### Correctness
 

@@ -43,6 +43,16 @@ DATA = os.path.join(REPO, "benchmarks", "device.toml")
 OUT = os.path.join(REPO, "png")
 STAGES = ["input", "attn", "ffn", "ple", "head"]
 
+# The firmware's `attn detail:` line, when a run carries it. `attn` is the
+# stage that scales with sequence position and the one where a five-number
+# profile stopped being enough: `qkv` and `proj` are the same fp32 matvec that
+# drives ffn and ple, `rope` is nothing, and `core` is attention proper. Those
+# have different levers, and the head already demonstrated what guessing which
+# one dominates costs. Optional -- the C reference has no equivalent
+# instrumentation, and Rust runs before the four-way split do not carry it.
+ATTN = [("attn_qkv", "qkv"), ("attn_rope", "rope"), ("attn_core", "core"),
+        ("attn_proj", "proj")]
+
 THEME = {
     "light": {
         "surface": "#fcfcfb", "text": "#0b0b0b", "muted": "#52514e",
@@ -226,6 +236,59 @@ def table(doc, runs):
         for rb in notes:
             stg = ", ".join(f"`{x}`" for x in str(rb["provisional_stages"]).split())
             o.append(f"† **{rb['label']}: {stg} is provisional.** {rb.get('note', '')}")
+
+    sub = attn_table(runs)
+    if sub:
+        o += ["", sub]
+
+    # The headline sentence, generated rather than written. It had been prose
+    # under the table quoting a tok/s and a percentage by hand, which is a
+    # third copy of a figure that lives in one file -- and it was already one
+    # run stale by the time anyone noticed. Same rule as the table: measured
+    # numbers are emitted, never typed.
+    if len(runs) > 1 and ref["engine"] == "c":
+        pct = (ref["wall_ms"] / last["wall_ms"] - 1.0) * 100.0
+        verb = "faster" if pct >= 0 else "slower"
+        o += ["", f"**Rust is {abs(pct):.1f}% {verb} per token than the C reference "
+                  f"it was ported from** — {last['wall_ms']:.1f} ms against "
+                  f"{ref['wall_ms']:.1f}, {last['tok_s']:.2f} tok/s against "
+                  f"{ref['tok_s']:.2f}, on the same board with byte-identical "
+                  f"output. It beats C on "
+                  f"{sum(1 for st in STAGES if last[st] < ref[st])} of the "
+                  f"{len(STAGES)} stages."]
+    return "\n".join(o)
+
+
+def attn_table(runs):
+    """The `attn detail:` breakdown, for the runs that carry it.
+
+    Emitted from the same file as the main table for the same reason: the
+    four-way split is what identified `core` as the last single-core stage, and
+    a figure that only exists in a commit message is a figure that goes stale.
+    Rows are omitted rather than zero-filled where a run predates the
+    instrumentation -- a missing measurement and a measured zero are different
+    things, and `rope` really is 0.1.
+    """
+    rows = [rb for _, rb in runs if all(k in rb for k, _ in ATTN)]
+    if not rows:
+        return ""
+    o = ["**`attn` broken down** — the sub-stages the five-stage profile hides. "
+         "`qkv`/`proj` are the fp32 matvec that also drives `ffn` and `ple`; "
+         "`core` is attention proper, the only part that grows with sequence "
+         "position. The C reference has no equivalent instrumentation, so it is "
+         "absent rather than zero.",
+         "",
+         "| attn ms/token | " + " | ".join(n for _, n in ATTN) +
+         " | sum | both cores |",
+         "|---" * (len(ATTN) + 3) + "|"]
+    for rb in rows:
+        cells = [f"{rb[k]:.2f}" if k == "attn_rope" else f"{rb[k]:.1f}"
+                 for k, _ in ATTN]
+        s = sum(rb[k] for k, _ in ATTN)
+        dual = str(rb.get("attn_dual", "")).split()
+        tag = ", ".join(f"`{d}`" for d in dual) if dual else "—"
+        o.append(f"| **{rb['label']}** | " + " | ".join(cells) +
+                 f" | {s:.1f} | {tag} |")
     return "\n".join(o)
 
 
