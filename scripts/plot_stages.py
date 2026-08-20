@@ -250,7 +250,11 @@ def inject(paths, body):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--runs", default="", help="comma-separated run ids; default is every run in the file, in file order")
+    ap.add_argument("--runs", default="", help="comma-separated run ids for the TABLE; default is every run in the file, in file order")
+    ap.add_argument("--chart-runs", default="",
+                    help="run ids for the CHART, which has only 4 validated colour slots; "
+                         "default is the first two and the last -- where it started, the "
+                         "reference, and where it is now")
     ap.add_argument("--table", action="store_true", help="print the markdown table to stdout")
     ap.add_argument("--inject", nargs="*", metavar="FILE",
                     default=None, help="rewrite the marked table region in these files "
@@ -272,11 +276,20 @@ def main():
         inject(a.inject or ["README.md", "BENCHMARKING.md"], table(doc, runs))
         return
 
+    # The table can hold every run; the chart cannot, and a chart with one bar
+    # per commit stops being readable long before it stops fitting.
+    chart = runs
+    if a.chart_runs:
+        want = [r.strip() for r in a.chart_runs.split(",") if r.strip()]
+        chart = runs_of(doc, want)
+    elif len(runs) > 3:
+        chart = [runs[0], runs[1], runs[-1]]
+
     os.makedirs(OUT, exist_ok=True)
     for mode, name in (("light", "benchmark-stages.svg"), ("dark", "benchmark-stages-dark.svg")):
         p = os.path.join(OUT, name)
         with open(p, "w", encoding="utf-8") as f:
-            f.write(svg(doc, runs, mode))
+            f.write(svg(doc, chart, mode))
         print(f"wrote {os.path.relpath(p, REPO)}")
 
 

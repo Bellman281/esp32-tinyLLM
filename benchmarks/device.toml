@@ -83,3 +83,45 @@ ple     = 12.7
 head    = 94.8
 wall_ms = 174.6
 tok_s   = 5.73
+
+[run.rust-int4]
+label   = "+ int4 head"
+engine  = "rust"
+date    = "2026-08-19"
+commit  = "perf(head): stage the output head as int4"
+note    = "Staged the head as packed int4 rather than unpacked int8: 2.54 MB -> 1.32 MB streamed, 1.2 MB of PSRAM returned, and the head stage moved 0.0 ms. Kept for the PSRAM. The null result is what prompted instrumenting the stage, which found the reason -- see [run.rust-lanes]."
+input   = 6.6
+attn    = 47.0
+ffn     = 10.1
+ple     = 12.7
+head    = 94.8
+wall_ms = 174.6
+tok_s   = 5.73
+
+[run.rust-lanes]
+label   = "+ 4 accumulators"
+engine  = "rust"
+date    = "2026-08-20"
+commit  = "perf(head): four accumulators in the int4 dot"
+note    = "First change made with the head instrumented. The probe reported 72 MB/s against 13.4 MB/s used, and wait-worker 0.0 with both halves equal, which together say the head is compute-bound rather than bandwidth-bound -- the opposite of what this file previously assumed. Splitting the single accumulator four ways broke the dependency chain: 91.0 -> 81.3. (Baseline 91.0, not 94.8: adding the instrumentation itself moved the head 3.8 ms on code placement.)"
+input   = 6.6
+attn    = 47.0
+ffn     = 10.1
+ple     = 12.7
+head    = 81.3
+wall_ms = 161.0
+tok_s   = 6.21
+
+[run.rust-bias]
+label   = "Rust, now"
+engine  = "rust"
+date    = "2026-08-20"
+commit  = "perf(head): hoist the int4 bias out of the dot; drop the lookup table"
+note    = "Two operations removed per element: the -8 bias, hoisted to one per-row correction via sum((c-8)a) == sum(ca) - 8*sum(a), and the NIBBLE_I8 load that had been standing in for it. The table is right for the fp32 paths, where it replaces an int-to-float conversion; on the integer path it replaced a subtract with a memory load, which is a worse trade. head 81.3 -> 61.5, i.e. 1.077x of C. Neither operation was visible at five-stage resolution."
+input   = 6.6
+attn    = 47.0
+ffn     = 10.1
+ple     = 12.7
+head    = 61.5
+wall_ms = 140.9
+tok_s   = 7.09

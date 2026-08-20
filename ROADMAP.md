@@ -13,8 +13,9 @@ that one for the numbers, this one for the plan.
 - Runs on an ESP32-S3-DevKitC (N16R8) and produces **byte-identical output
   to the C firmware** over 400 tokens.
 - Host parity suite green: 17 tests, 15 under `--features int8-activations`.
-- **~1.49x slower than C** overall (178.2 vs 119.8 ms/token) after the
-  nibble-LUT change; 1.50x (179.6) before it — measured on one
+- **~1.15x slower than C** overall (137.9 vs 119.8 ms/token) after the
+  nibble-LUT, KV-layout and head-arithmetic work; 1.53x (183.9) before any of
+  it — measured on one
   board, same evening, same `model.bin`.
 - Phases 0–3 done. Phases 4 (display), 5 (bandwidth bench), 6 (drop
   FreeRTOS) not started.
@@ -47,7 +48,11 @@ reproducible. Also settles the hook's cost as a side effect — see below.
 
 ### 2. Port `bandwidth_bench` (Phase 5)
 
-**The head is +40.9 ms — roughly two-thirds of the whole gap — and we don't know why.**
+**The head was +40.9 ms and is now +4.4 (1.08x of C).** It was never
+bandwidth-bound — instrumenting it showed 19% of available PSRAM bandwidth in
+use and a stalled dependency chain plus two redundant operations per element.
+See BENCHMARKING.md's "The output head — done". The gap is now spread almost
+evenly across all five stages, with no stage above 1.50x.
 
 The belief that it's PSRAM-bandwidth-bound rests on a single data point:
 widening the external-memory caches moved it −21%, more than any other

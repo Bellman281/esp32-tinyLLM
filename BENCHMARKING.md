@@ -35,9 +35,12 @@ either firmware drifts from them.
 | **Rust, before** | 7.8 | 54.4 | 11.9 | 15.2 | 94.6 | **183.9** | 5.34 |
 | **Rust, nibble LUT** | 6.6 | 50.8 | 10.1 | 12.7 | 98.0 | **178.2** | 5.51 |
 | **Rust, + KV layout** | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | **171.2** | 5.73 |
-| ratio vs C reference | 1.50x | 1.10x | 1.46x | 1.49x | 1.66x | **1.43x** | |
-| absolute gap | +2.2 | +4.1 | +3.2 | +4.2 | +37.7 | +51.4 | |
-| **change this brought** | +0.0 | -3.8 | +0.0 | +0.0 | -3.2 | **-7.0** | |
+| **+ int4 head** | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | **171.2** | 5.73 |
+| **+ 4 accumulators** | 6.6 | 47.0 | 10.1 | 12.7 | 81.3 | **157.7** | 6.21 |
+| **Rust, now** | 6.6 | 47.0 | 10.1 | 12.7 | 61.5 | **137.9** | 7.09 |
+| ratio vs C reference | 1.50x | 1.10x | 1.46x | 1.49x | 1.08x | **1.15x** | |
+| absolute gap | +2.2 | +4.1 | +3.2 | +4.2 | +4.4 | +18.1 | |
+| **change this brought** | +0.0 | +0.0 | +0.0 | +0.0 | -19.8 | **-19.8** | |
 
 <!-- END device-table -->
 
@@ -73,6 +76,49 @@ implementations of the same math, including the dual-core int8-staged head,
 agreeing token for token on real silicon. Boot diagnostics agree too
 (`head staged int8: 2.54 MB`; PSRAM free 3141 KB for C, 3211 KB for Rust —
 different allocators, same model).
+
+## Instrumentation
+
+Two things the firmware prints beyond the five-stage line, both added after the
+five stages proved too coarse twice in one day — once failing to separate a
+code-placement shift from a real regression, once failing to explain why
+halving the head's memory traffic changed nothing.
+
+**A PSRAM bandwidth probe**, at boot, over the head's own staged weights — same
+allocation, same direction, same cold-stream pattern, far larger than the data
+cache:
+
+```
+PSRAM read: 72 MB/s  (1.22 MB of head weights => 16.9 ms/token floor)
+```
+
+Read it as a floor. Streaming `n` MB at `b` MB/s cannot cost less than
+`1000n/b` ms, and whatever a stage spends above that floor is arithmetic no
+amount of compression will reach. This is the minimum useful part of
+`reference-c/firmware/bandwidth_bench/` (Phase 5, still unported) — enough to
+choose between attacking bytes and attacking instructions, which is the choice
+this project got wrong once.
+
+**Head sub-stage timers**, under the profile line:
+
+```
+head detail: quant 0.04 | own-half 61.4 | wait-worker 0.0 | worker-half 61.4
+```
+
+- `own + wait` should account for nearly all of the `head` figure.
+- `wait` near zero means the calling core is the slow half and the row split is
+  fine. `wait` large would mean the worker's half takes materially longer and
+  moving `split` off `rows / 2` is free throughput. It has measured 0.0 every
+  time, so the even row split is also an even time split — worth knowing, and
+  cheap to stop wondering about.
+- `worker` is the other half timed on the worker itself, so `wait` much larger
+  than `worker - own` would be scheduling latency rather than compute.
+- `quant` should be negligible (96 elements). It is 0.04.
+
+Cost: four `esp_timer_get_time` calls per token on the inference core, two on
+the worker, against stages measured in tens of milliseconds. Not feature-gated
+— the point is that it is on when someone reflashes and wonders where the time
+went.
 
 ## Reproducibility and the layout tax
 
@@ -301,6 +347,10 @@ both firmwares' constants against the registry.
 | + dual-core, byte-pair unroll | 8.0 | 58.9 | 11.8 | 15.1 | 110.9 | 204.8 | 4.79 |
 | + wider caches | 7.4 | 53.7 | 11.2 | 14.3 | 87.6 | 174.2 | 5.64 |
 | + nibble LUT, pair-unrolled unpack | 6.6 | 50.8 | 10.1 | 12.7 | 98.0 | 178.2 | 5.51 |
+| + per-head KV layout | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | 171.2 | 5.73 |
+| + int4-staged head | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | 171.2 | 5.73 |
+| + 4 accumulators in the head dot | 6.6 | 47.0 | 10.1 | 12.7 | 81.3 | 157.7 | 6.21 |
+| + bias hoist, drop the LUT | 6.6 | 47.0 | 10.1 | 12.7 | 61.5 | 137.9 | 7.09 |
 
 All at 400 tokens / 18-token prompt, so comparable to each other and to the
 C row above. Three changes, in order of what they were worth:
@@ -399,7 +449,56 @@ first, and benchmark. An FFI call per row has real overhead at these row
 lengths (66–128 elements), so this is **not** a guaranteed win — it needs a
 before/after on hardware, not an assumption that SIMD is faster.
 
-### 2. The output head — biggest absolute gap, but diagnose first
+### 2. The output head — done, and the diagnosis was the whole story
+
+**Resolved. The head went 94.6 -> 61.5 ms, 1.66x -> 1.08x of C.** What follows
+is kept because the reasoning that got there is reusable and the reasoning that
+preceded it was wrong.
+
+This section used to say the head was bandwidth-bound, on the strength of the
+`+ wider caches` change moving it 21% — more than any change had moved any
+stage. Acting on that produced the int4 staging, which halved what the head
+streams (2.54 MB -> 1.32 MB), returned 1.2 MB of PSRAM, and moved the stage
+**0.0 ms**.
+
+The null result is what forced the stage to be instrumented, and the
+instruments answered in one run:
+
+```
+PSRAM read: 72 MB/s  (1.22 MB of head weights => 16.9 ms/token floor)
+head detail: quant 0.04 | own-half 90.9 | wait-worker 0.0 | worker-half 90.9
+```
+
+`wait-worker 0.0` with both halves equal means each core independently
+completes its rows in 90.9 ms while the other does the same — so aggregate
+throughput was 1.22 MB in 91 ms, **13.4 MB/s against 72 MB/s available**. The
+head was using 19% of its own bandwidth. If memory had been the constraint,
+two cores could not both have hit 90.9. It was compute-bound the whole time,
+and `+ wider caches` helped for some other reason.
+
+What was actually wrong was two operations per element in a loop that runs
+2.43M times per token:
+
+1. **One accumulator.** `acc += a[i] * b[i]` makes every add wait for the
+   previous one. Four independent accumulators: 91.0 -> 81.3. Bit-exact —
+   `i32` addition is associative.
+2. **A subtract and a table load that should not have existed.** Codes are
+   stored biased, and `sum (c-8)a == sum ca - 8 sum a`, where `sum a` is
+   identical for all 25,353 rows. Hoisting it deletes the subtract; deleting
+   the subtract also deletes the `NIBBLE_I8` lookup that had been standing in
+   for it. 81.3 -> 61.5. Also exact — the identity holds over the integers.
+
+That second one is worth dwelling on. `NIBBLE_I8` was introduced alongside
+`NIBBLE_F32`, where the table genuinely wins: it replaces an integer-to-float
+*conversion* with a load, measured -24% on the host head. On the integer path
+it replaced a *subtract* with a load, which is a worse instruction on any
+machine. The pattern was copied without re-deriving whether it applied.
+
+Neither operation was visible at five-stage resolution. Both were obvious once
+the stage was split four ways. **The instrument was worth more than any guess
+about the stage.**
+
+### 2b. Historical: the output head — biggest absolute gap, but diagnose first
 
 At +40.9 ms/token the head is now **roughly two-thirds of the entire
 Rust-vs-C gap** — it was 56% before the nibble-LUT change shrank everything
