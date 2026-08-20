@@ -42,11 +42,11 @@
 //! host-side test can exercise (there's no FreeRTOS on the host).
 
 use core::cell::{Cell, UnsafeCell};
-use core::sync::atomic::{AtomicI32, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::hal::sys::{esp_timer_get_time, TaskHandle_t, TickType_t};
 use esp_idf_svc::hal::task;
-use llm_core::{activation_sum, dot_int4_int8, quantize_activations, QT};
+use llm_core::{dot_int8_int8, quantize_activations, QT};
 
 use crate::psram;
 
@@ -132,13 +132,13 @@ pub const MAX_ATTN_SEQ: usize = 512;
 /// there is exactly one instance, leaked for `'static` lifetime by
 /// `stage_and_spawn`, same as the C reference's file-scope globals.
 pub struct Head {
-    // [rows * row_bytes] of PACKED int4 codes in PSRAM -- NOT the C
-    // reference's [rows * cols] int8. See `stage_and_spawn`.
-    w4: &'static [u8],
+    // [rows * cols] of UNPACKED int8 weights in PSRAM, same as the C
+    // reference. This was packed int4 until the bandwidth probe settled what
+    // the head is actually short of -- see `stage_and_spawn`.
+    w8: &'static [i8],
     scale8: &'static [f32], // [rows], per-row dequant scale
     rows: usize,
     cols: usize,
-    row_bytes: usize, // ceil(cols / 2)
 
     // Shared quantized-activation scratch: written once by `matvec` before
     // notifying the worker, read by both `matvec` (this core's half) and
@@ -148,10 +148,6 @@ pub struct Head {
     // after the worker is done reading it. See the module doc comment.
     actq: UnsafeCell<[i8; MAX_HEAD_COLS]>,
     acts: AtomicU32, // f32 bits (no AtomicF32 in core)
-    // Sum of `actq`, written with it and read by both cores for every row --
-    // see llm_core::dot_int4_int8 for why one number per token replaces one
-    // subtract per element.
-    act_sum: AtomicI32,
 
     // The current job's output pointer and row split, set by `matvec`
     // before notifying the worker.
@@ -276,8 +272,7 @@ impl Head {
         let mut best_val = f32::NEG_INFINITY;
         let mut best_idx = r0;
         let cols = self.cols;
-        let rb = self.row_bytes;
-        let w4 = self.w4;
+        let w8 = self.w8;
         let scale8 = self.scale8;
         // Slice the fixed-size scratch down to `cols` ONCE, out here, rather
         // than indexing `actq[j]` in the inner loop. `actq` is a
@@ -294,15 +289,15 @@ impl Head {
         let actq_all: &[i8; MAX_HEAD_COLS] = unsafe { &*self.actq.get() };
         let actq: &[i8] = &actq_all[..cols];
         let acts = f32::from_bits(self.acts.load(Ordering::Acquire));
-        let act_sum = self.act_sum.load(Ordering::Acquire);
         for r in r0..r1 {
-            // Two codes per byte, unpacked in the loop instead of at boot.
-            // `llm_core::dot_int4_int8` is asserted bit-for-bit equal to the
-            // staged-int8 dot over every row of the shipped model by
-            // llm-host/tests/int4_head_equivalence.rs -- integer addition is
-            // associative and every term is the same term, so this is exact,
-            // not approximate.
-            let acc = dot_int4_int8(&w4[r * rb..r * rb + rb], actq, act_sum);
+            // No unpack. The weights were widened to int8 once at boot, so the
+            // inner loop is a plain `i8 * i8` multiply-accumulate -- the same
+            // shape the C reference runs, and one operation per element fewer
+            // than the packed-int4 form this replaced.
+            // `llm-host/tests/int8_head_equivalence.rs` asserts this produces
+            // bit-identical logits to the int4 path on every row of the
+            // shipped model, and that both match a naive reference sum.
+            let acc = dot_int8_int8(&w8[r * cols..r * cols + cols], actq);
             let val = acc as f32 * scale8[r] * acts;
             // SAFETY: caller's contract (see this fn's doc comment) is that
             // `y[r0..r1]` is this call's alone to write.
@@ -342,9 +337,6 @@ impl Head {
             &mut arr[..self.cols]
         };
         let scale = quantize_activations(&x[..self.cols], actq);
-        // Relaxed: the Release on `acts` immediately below publishes both, the
-        // same way it already publishes `actq`.
-        self.act_sum.store(activation_sum(actq), Ordering::Relaxed);
         self.acts.store(scale.to_bits(), Ordering::Release);
 
         // Capture the raw pointer once; from here on both this core and
@@ -675,7 +667,16 @@ impl Head {
     /// one so the number is directly comparable to what the head streams per
     /// token -- same allocation, same size, same direction.
     pub fn probe_weight_bandwidth(&self) -> (usize, f64) {
-        (self.w4.len(), psram::probe_read_bandwidth(self.w4))
+        (self.w8.len(), psram::probe_read_bandwidth(self.weight_bytes()))
+    }
+
+    /// The staged weights as raw bytes, for the bandwidth probes. `i8` and
+    /// `u8` have identical layout; this is a reinterpretation, not a copy.
+    fn weight_bytes(&self) -> &'static [u8] {
+        // SAFETY: same length, same alignment, same provenance -- `w8` is a
+        // 'static PSRAM allocation and both types are one byte with no
+        // niches.
+        unsafe { core::slice::from_raw_parts(self.w8.as_ptr() as *const u8, self.w8.len()) }
     }
 
     /// Stream this head's staged weights with BOTH cores at once, over
@@ -704,9 +705,10 @@ impl Head {
     /// that is 0.13%, and both per-core times are returned so an imbalance
     /// large enough to matter is visible rather than folded into the average.
     pub fn probe_weight_bandwidth_dual(&self) -> (usize, f64, u32, u32) {
-        let n = self.w4.len();
+        let bytes = self.weight_bytes();
+        let n = bytes.len();
         let half = n / 2;
-        let (lo, hi) = self.w4.split_at(half);
+        let (lo, hi) = bytes.split_at(half);
 
         self.pr_ptr
             .store(lo.as_ptr() as *mut u8, Ordering::Relaxed);
@@ -887,31 +889,44 @@ pub fn stage_and_spawn(tok_emb: QT<'static>, vocab_n: usize) -> Result<&'static 
         return Err("model dim exceeds MAX_HEAD_COLS (128) -- head_actq scratch too small");
     }
 
-    let row_bytes = t.row_bytes;
-    let (w4, scale8) = psram::alloc_head_tables(rows * row_bytes, rows);
+    // UNPACK ONCE AT BOOT, NOT 2.43M TIMES PER TOKEN.
+    //
+    // This staged packed int4 until the dual-core bandwidth probe settled what
+    // the head is short of. Packing halved what the stage streams -- 2.54 MB
+    // to 1.32 -- and moved it 0.0 ms, because the head runs at 21% of
+    // available PSRAM bandwidth and is compute-bound. Meanwhile every element
+    // paid a mask or a shift to get its nibble out, which the C reference
+    // (int8-staged) never pays, and the head is the one stage still above C.
+    //
+    // So: spend the 1.22 MB, delete the per-element unpack. Bit-exact --
+    // `unpack_row_int8` is exact for 4-bit codes and
+    // llm-host/tests/int8_head_equivalence.rs holds both dots to a naive
+    // reference sum on every row.
+    let (raw, scale8) = psram::alloc_head_tables(rows * cols, rows);
+    // SAFETY: `i8` and `u8` have identical size, alignment and validity; this
+    // reinterprets the allocation, it does not copy or reallocate it.
+    let w8: &'static mut [i8] =
+        unsafe { core::slice::from_raw_parts_mut(raw.as_mut_ptr() as *mut i8, raw.len()) };
     for r in 0..rows {
-        let (codes, scale) = t.packed_row(r);
-        w4[r * row_bytes..(r + 1) * row_bytes].copy_from_slice(codes);
-        scale8[r] = scale;
+        scale8[r] = t.unpack_row_int8(r, &mut w8[r * cols..(r + 1) * cols]);
     }
     log::info!(
-        "head staged int4: {:.2} MB (int8 staging would be {:.2} MB)",
-        (rows * row_bytes + rows * 4) as f64 / 1e6,
-        (rows * cols + rows * 4) as f64 / 1e6
+        "head staged int8: {:.2} MB (packed int4 would be {:.2} MB, and cost \
+         one unpack per element per token)",
+        (rows * cols + rows * 4) as f64 / 1e6,
+        (rows * t.row_bytes + rows * 4) as f64 / 1e6
     );
 
     let inference_task =
         task::current().ok_or("no current FreeRTOS task handle -- call stage_and_spawn from main")?;
 
     let head: &'static Head = Box::leak(Box::new(Head {
-        w4,
+        w8,
         scale8,
         rows,
         cols,
-        row_bytes,
         actq: UnsafeCell::new([0i8; MAX_HEAD_COLS]),
         acts: AtomicU32::new(0),
-        act_sum: AtomicI32::new(0),
         job_y: core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),
         job_split: AtomicUsize::new(0),
         worker: Cell::new(core::ptr::null_mut()),
