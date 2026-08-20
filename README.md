@@ -78,10 +78,12 @@ a firmware that is fast because it computes something else is not a result.
 | **+ attn instrumented** | 3.9 | 39.0 | 6.2 | 7.6 | 61.9 | 118.6 | **118.5** | 8.43 |
 | **+ attn heads split** | 3.9 | 26.4 | 6.2 | 7.6 | 62.7 | 106.8 | **106.8** | 9.36 |
 | **Rust, now** | 3.9 | 26.3 | 6.2 | 7.6 | 62.3 | 106.3 | **106.3** | 9.41 |
-| **+ MSPI bus 120 MHz** | 3.6 | 24.5 | 5.7 | 7.0 | 62.1 | 102.9 | **102.9** | 9.71 |
-| ratio vs C reference | 0.82x | 0.57x | 0.83x | 0.82x | 1.09x | 0.86x | **0.84x** | |
-| absolute gap | -0.8 | -18.4 | -1.2 | -1.5 | +5.0 | -16.9 | **-19.1** | |
-| **change this brought** | -0.3 | -1.8 | -0.5 | -0.6 | -0.2 | -3.4 | **-3.4** | |
+| **+ MSPI bus 120 MHz** ‡ | 3.6 | 24.5 | 5.7 | 7.0 | 62.1 | 102.9 | **102.9** | 9.71 |
+| ratio vs C reference | 0.89x | 0.61x | 0.90x | 0.89x | 1.09x | 0.89x | **0.87x** | |
+| absolute gap | -0.5 | -16.6 | -0.7 | -0.9 | +5.2 | -13.5 | **-15.7** | |
+| **change this brought** | +0.0 | -0.1 | +0.0 | +0.0 | -0.4 | -0.5 | **-0.5** | |
+
+‡ **+ MSPI bus 120 MHz is not the shipping configuration** and is excluded from the ratios and the summary below. Requires CONFIG_IDF_EXPERIMENTAL_FEATURES; Espressif documents 120 MHz as temperature-sensitive and not recommended across the industrial range, and this board's boya flash part refused it and fell back. Real, reproducible, bit-exact -- and not what you get by cloning this repo. Available as a +3.3% opt-in; see BENCHMARKING.md.
 
 **`attn` broken down** — the sub-stages the five-stage profile hides. `qkv`/`proj` are the fp32 matvec that also drives `ffn` and `ple`; `core` is attention proper, the only part that grows with sequence position. The C reference has no equivalent instrumentation, so it is absent rather than zero.
 
@@ -92,7 +94,7 @@ a firmware that is fast because it computes something else is not a result.
 | **Rust, now** | 7.8 | 0.15 | 15.6 | 2.7 | 26.2 | `qkv`, `proj`, `core` |
 | **+ MSPI bus 120 MHz** | 7.2 | 0.15 | 14.7 | 2.5 | 24.6 | `qkv`, `proj`, `core` |
 
-**Rust is 18.6% faster per token than the C reference it was ported from** — 102.9 ms against 122.0, 9.71 tok/s against 8.20, on the same board with byte-identical output. It beats C on 4 of the 5 stages.
+**Rust is 14.8% faster per token than the C reference it was ported from** — 106.3 ms against 122.0, 9.41 tok/s against 8.20, on the same board with byte-identical output. It beats C on 4 of the 5 stages.
 
 <!-- END device-table -->
 
