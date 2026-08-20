@@ -253,7 +253,7 @@ attn_proj = 2.7
 attn_dual = "qkv proj core"
 
 [run.rust-digest]
-label   = "Rust, now"
+label   = "+ token digest"
 engine  = "rust"
 date    = "2026-08-20"
 commit  = "test: make byte-identical output something the board asserts (eb39e59)"
@@ -311,4 +311,23 @@ attn_qkv  = 7.9
 attn_rope = 0.15
 attn_core = 16.0
 attn_proj = 2.7
+attn_dual = "qkv proj core"
+
+[run.rust-findings]
+label   = "Rust, now"
+engine  = "rust"
+date    = "2026-08-20"
+commit  = "perf/memory-findings tip -- probe + fp16 measurement + docs (467131a)"
+note    = "The branch's own binary, measured before merging rather than assumed. No arithmetic changed against [run.rust-digest]: the dual-core probe runs once at boot, outside the timed loop, and dot_int8_int8 has no caller. The +0.3 ms is therefore layout tax from ~50 lines added to head.rs -- recorded because merging this makes main marginally slower and the README headline should say so rather than keep quoting a binary that no longer exists. Digest 0x327578cb136fd6aa OK. This also re-measures the probe binary a second time at exactly 106.6 / head 63.2, matching the first run to 0.0 ms, which is the reproducibility claim holding."
+input   = 3.8
+attn    = 26.2
+ffn     = 6.0
+ple     = 7.3
+head    = 63.2
+wall_ms = 106.6
+tok_s   = 9.38
+attn_qkv  = 7.6
+attn_rope = 0.15
+attn_core = 15.9
+attn_proj = 2.6
 attn_dual = "qkv proj core"
