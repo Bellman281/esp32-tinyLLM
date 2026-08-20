@@ -270,3 +270,22 @@ attn_rope = 0.15
 attn_core = 15.6
 attn_proj = 2.7
 attn_dual = "qkv proj core"
+
+[run.rust-mspi120]
+label   = "+ MSPI bus 120 MHz"
+engine  = "rust"
+date    = "2026-08-20"
+commit  = "exp(firmware): run the MSPI bus at 120 MHz -- PSRAM and flash together (da40739)"
+note    = "Config only, no code change, bit-exact -- token digest still 0x327578cb136fd6aa OK. PSRAM 80->120 MHz, which forces flash along with it because they share the MSPI peripheral and ESP-IDF has no 80M-flash timing table at the 240 MHz core clock that 120M PSRAM implies. Bandwidth: 1 core 72->81 MB/s, 2 cores 91->131, core scaling 1.27x->1.62x. NOT separately attributable by construction; a follow-up (exp/flash-80m) raised flash 40->80 with PSRAM left at 80 and measured 106.6 ms, i.e. NOTHING, which rules out the flash module clock as the cause and points at the shared MSPI core clock instead. EXPERIMENTAL: needs CONFIG_IDF_EXPERIMENTAL_FEATURES, is temperature-sensitive per Espressif, and this board's boya flash part logged 'High performance mode of this flash model hasn.t been supported' -- it refused 120 MHz flash and fell back. Do not copy into a product."
+input   = 3.6
+attn    = 24.5
+ffn     = 5.7
+ple     = 7.0
+head    = 62.1
+wall_ms = 102.9
+tok_s   = 9.71
+attn_qkv  = 7.2
+attn_rope = 0.15
+attn_core = 14.7
+attn_proj = 2.5
+attn_dual = "qkv proj core"

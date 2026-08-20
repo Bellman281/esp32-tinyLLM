@@ -47,9 +47,10 @@ either firmware drifts from them.
 | **+ attn instrumented** | 3.9 | 39.0 | 6.2 | 7.6 | 61.9 | 118.6 | **118.5** | 8.43 |
 | **+ attn heads split** | 3.9 | 26.4 | 6.2 | 7.6 | 62.7 | 106.8 | **106.8** | 9.36 |
 | **Rust, now** | 3.9 | 26.3 | 6.2 | 7.6 | 62.3 | 106.3 | **106.3** | 9.41 |
-| ratio vs C reference | 0.89x | 0.61x | 0.90x | 0.89x | 1.09x | 0.89x | **0.87x** | |
-| absolute gap | -0.5 | -16.6 | -0.7 | -0.9 | +5.2 | -13.5 | **-15.7** | |
-| **change this brought** | +0.0 | -0.1 | +0.0 | +0.0 | -0.4 | -0.5 | **-0.5** | |
+| **+ MSPI bus 120 MHz** | 3.6 | 24.5 | 5.7 | 7.0 | 62.1 | 102.9 | **102.9** | 9.71 |
+| ratio vs C reference | 0.82x | 0.57x | 0.83x | 0.82x | 1.09x | 0.86x | **0.84x** | |
+| absolute gap | -0.8 | -18.4 | -1.2 | -1.5 | +5.0 | -16.9 | **-19.1** | |
+| **change this brought** | -0.3 | -1.8 | -0.5 | -0.6 | -0.2 | -3.4 | **-3.4** | |
 
 **`attn` broken down** — the sub-stages the five-stage profile hides. `qkv`/`proj` are the fp32 matvec that also drives `ffn` and `ple`; `core` is attention proper, the only part that grows with sequence position. The C reference has no equivalent instrumentation, so it is absent rather than zero.
 
@@ -58,8 +59,9 @@ either firmware drifts from them.
 | **+ attn instrumented** | 7.8 | 0.14 | 28.3 | 2.7 | 38.9 | `qkv`, `proj` |
 | **+ attn heads split** | 7.9 | 0.15 | 15.6 | 2.7 | 26.3 | `qkv`, `proj`, `core` |
 | **Rust, now** | 7.8 | 0.15 | 15.6 | 2.7 | 26.2 | `qkv`, `proj`, `core` |
+| **+ MSPI bus 120 MHz** | 7.2 | 0.15 | 14.7 | 2.5 | 24.6 | `qkv`, `proj`, `core` |
 
-**Rust is 14.8% faster per token than the C reference it was ported from** — 106.3 ms against 122.0, 9.41 tok/s against 8.20, on the same board with byte-identical output. It beats C on 4 of the 5 stages.
+**Rust is 18.6% faster per token than the C reference it was ported from** — 102.9 ms against 122.0, 9.71 tok/s against 8.20, on the same board with byte-identical output. It beats C on 4 of the 5 stages.
 
 <!-- END device-table -->
 
@@ -577,7 +579,68 @@ is *before* assuming SIMD is the answer —
 `reference-c/firmware/bandwidth_bench/` exists for exactly this measurement
 and has not been ported (Phase 5).
 
-### Is attention's `core` bandwidth-bound?
+### Is attention's `core` bandwidth-bound? — yes, and the bus does not scale
+
+**Settled.** The probe ran, and the answer changed what the next lever is.
+
+| | 1 core | 2 cores, disjoint halves | scaling |
+|---|---|---|---|
+| PSRAM @ 80 MHz | 72 MB/s | 91 MB/s | **1.27x** |
+| PSRAM @ 120 MHz | 81 MB/s | 131 MB/s | **1.62x** |
+
+A second LX7 buys 27% more bandwidth, not 100%. Both cores finished within
+0.1 ms of each other, so this is the bus, not imbalance. Against that ceiling:
+
+| | streams/token | stage | rate | of available |
+|---|---|---|---|---|
+| output head | 1.22 MB | 63.2 ms | 19.3 MB/s | **21%** — compute-bound |
+| attention `core` | 1.01 MB | 15.9 ms | 63.3 MB/s | **70%** — memory-bound |
+
+Attention reads the whole KV cache every token — `219 positions x 96 floats x
+4 bytes x 2 x 6 layers` at the benchmark settings, almost as much as the entire
+output head. That is the exact inverse of what this document assumed about the
+two stages a day earlier.
+
+**Raising the MSPI clock is the bit-exact lever, and it is worth 3.4 ms.**
+PSRAM 80 -> 120 MHz took the token 106.3 -> 102.9 with the digest unchanged.
+It forces flash along with it: the two share the MSPI peripheral, and at the
+240 MHz core clock that 120M PSRAM implies, ESP-IDF ships no 80M-flash timing
+table — the build fails outright saying so.
+
+**Two things that were guessed wrong here, both cheaply.** First, the win was
+predicted at ~7 ms by modelling each stage as `memory + compute` and halving
+the memory term. The head moved **0.3%** while its memory floor dropped from
+13.4 to 9.3 ms — which is what compute-bound actually means: the transfer was
+already hidden behind arithmetic, so making it faster changes nothing. The
+additive model was wrong for the stage it mattered most for.
+
+Second, the per-stage shape (`input -7.7%`, `qkv -7.7%`, `ffn -8.1%`,
+`ple -7.9%`, `proj -7.4%`, `core -5.8%`, `head -0.3%`) looked like a *flash*
+win, because everything that moved reads weights through the flash mmap and
+the head does not. A follow-up raising flash 40 -> 80 MHz with PSRAM left at
+80 measured **106.6 ms — nothing at all**, ruling that out. The remaining
+explanation, inferred rather than measured: the shared MSPI *core* clock going
+160 -> 240 MHz cuts per-miss latency for flash and PSRAM alike, which helps
+stages that take many scattered cache misses and does nothing for a stage that
+streams sequentially and is compute-bound anyway.
+
+**The caveat that decides whether to keep it.** 120 MHz needs
+`CONFIG_IDF_EXPERIMENTAL_FEATURES`, is documented by Espressif as
+temperature-sensitive and not recommended across the industrial range, and
+this board's flash logs `High performance mode of this flash model hasn't been
+supported` — the boya part refused 120 MHz flash and fell back. It is a
+reasonable setting for a benchmark board on a desk and an unreasonable one for
+a product.
+
+**What is left for memory.** An fp16 KV cache would halve attention's 1.01 MB.
+Measured cost, before building it: validation cross-entropy +1.1e-5 (one
+hundred and eighteenth of the int8-activation noise floor this project already
+ships with), but the token stream forks at generated token 136 under the
+firmware's head — one flipped argmax, then a different continuation, no
+re-convergence. See `llm-host/tests/fp16_kv_tolerance.rs`. It would retire
+"byte-identical output" as a claim.
+
+#### The original open question, for the record
 
 Open, and cheap to settle. Splitting the four attention heads two-per-core
 took `core` from 28.3 to 15.6 ms. A perfect halving would be 14.15, plus the
