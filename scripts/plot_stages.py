@@ -409,13 +409,23 @@ def main():
     if a.chart_runs:
         want = [r.strip() for r in a.chart_runs.split(",") if r.strip()]
         chart = runs_of(doc, want)
-    elif len(runs) > 3:
-        # Same rule as the table's headline: an experimental run is shown in
-        # the table but must not become the "now" bar in the README's chart,
-        # which is the one figure most people will read and none of them will
-        # read the footnote for.
+    elif len(runs) > 2:
+        # TWO BARS: the C reference, and where Rust is now. Nothing else.
+        #
+        # This used to be three -- C, the first Rust run, and now -- and the
+        # third bar was doing harm. "Rust, first run" was 311.5 ms/token, two
+        # and a half times the C reference, so it set the chart's x-axis and
+        # squashed the two bars anyone actually wants to compare into the left
+        # fifth of the plot. It also answered a question nobody asked: the
+        # optimization history is what the table is for, and the table has all
+        # 24 rows of it.
+        #
+        # Same rule as the table's headline: an experimental run appears in the
+        # table but must never become the "now" bar, which is the one figure
+        # most people will read and none of them will read the footnote for.
         ship = [r for r in runs if not r[1].get("experimental")]
-        chart = [runs[0], runs[1], (ship or runs)[-1]]
+        ref = next((r for r in runs if r[1]["engine"] == "c"), runs[0])
+        chart = [ref, (ship or runs)[-1]]
 
     os.makedirs(OUT, exist_ok=True)
     for mode, name in (("light", "benchmark-stages.svg"), ("dark", "benchmark-stages-dark.svg")):
