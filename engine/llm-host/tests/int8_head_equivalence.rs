@@ -9,9 +9,20 @@
 //!
 //! It is not free, though. Every element pays a mask or a shift to extract its
 //! nibble, in a loop that runs 2.43M times per token — and the C reference,
-//! which stages int8, never pays it. The head is the one stage still above C
-//! (1.09x, against 0.89–0.90x everywhere else), and this is a specific,
-//! testable reason why.
+//! which stages int8, never pays it. When this test was written the head was
+//! the one stage still above C (1.09x, against 0.89–0.90x everywhere else),
+//! and this looked like a specific, testable reason why.
+//!
+//! HOW IT TURNED OUT. It was tested, and it was the wrong reason: staging
+//! int8 made the head 62.3 -> 76.9 ms and the token 106.3 -> 121.5. The extra
+//! 1.2 MB streamed per token cost more than the mask saved — which also
+//! falsified "the head is compute-bound so bytes don't matter". Low bandwidth
+//! utilisation is not the same as insensitivity to bytes. Reverted.
+//!
+//! The gap closed from the instruction side instead: `i16` activations, then
+//! two rows per pass. The head is now 49.7 ms, 0.87x of C, with the packing
+//! untouched. This test is kept because the equivalence it asserts is what
+//! makes the experiment cheap to re-run on a board with different memory.
 //!
 //! WHAT THIS ASSERTS. That `dot_int8_int8` over `QT::unpack_row_int8`'s output
 //! is bit-for-bit identical to `dot_int4_int8` over the packed row, for every

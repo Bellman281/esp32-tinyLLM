@@ -754,6 +754,11 @@ pub fn dot4_int4_int16(rows: [&[u8]; 4], actq: &[i16], act_sum: i32) -> [i32; 4]
 /// accumulator chains already cover load-use latency and the only lever left
 /// is fewer instructions per MAC.
 ///
+/// MEASURED AFTER: 8.13 cycles/MAC cache-resident against 9.01 streaming, and
+/// the head 55.3 -> 49.7 ms/token. Close to the ~11% the instruction count
+/// predicted. Going further -- four rows, `dot4_int4_int16` -- spilled the
+/// register file and gave the head back 3.5 ms; see that function's doc.
+///
 /// One instruction is free for the taking. The activation vector is the *same*
 /// for all 25,353 rows, and `dot_int4_int16` reloads it for every one of them
 /// — 2.43M `l16si` per token to read 96 distinct values. Doing two rows in one
@@ -841,9 +846,19 @@ pub fn dot2_int4_int16(row_a: &[u8], row_b: &[u8], actq: &[i16], act_sum: i32) -
 ///
 /// Which makes the packing a cost with no benefit. Every element pays a mask
 /// or a shift to get its nibble out, in a loop that runs 2.43M times per
-/// token, and the C reference -- which stages int8 -- never pays it. That is a
-/// candidate explanation for the head being the one stage still above C
-/// (1.09x) while every other stage is at 0.89-0.90x.
+/// token, and the C reference -- which stages int8 -- never pays it. That was
+/// a candidate explanation for the head being, at the time this was written,
+/// the one stage still above C (1.09x) while every other stage sat at
+/// 0.89-0.90x.
+///
+/// IT WAS THE WRONG CANDIDATE, twice over. Staging int8 to avoid the unpack
+/// was measured and made the head 62.3 -> 76.9 ms (see
+/// `llm-host/tests/int8_head_equivalence.rs`); the extra 1.2 MB streamed cost
+/// more than the mask saved. What actually closed the gap was two changes
+/// that left the packing alone: holding the activation as `i16` so the LX7's
+/// `l16si` folds a `sext` into the load, and doing two rows per pass so each
+/// activation is loaded once for two multiply-accumulates. The head is now
+/// 49.7 ms against C's 57.1 -- 0.87x, below C rather than above it.
 ///
 /// Bit-exact against `dot_int4_int8` over the same row: unpacking is exact
 /// (`nibble - 8` for a 4-bit code is always representable in `i8`), the
