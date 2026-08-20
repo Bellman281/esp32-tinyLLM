@@ -566,7 +566,9 @@ pub fn activation_sum(actq: &[i8]) -> i32 {
 /// THE INNER LOOP HAS NO SUBTRACT AND NO TABLE. Codes are stored biased
 /// (`nibble = value + 8`), so the obvious form is `(nibble - 8) * a`. But
 ///
-///     sum_j (c_j - 8) * a_j  ==  sum_j c_j * a_j  -  8 * sum_j a_j
+/// ```text
+/// sum_j (c_j - 8) * a_j  ==  sum_j c_j * a_j  -  8 * sum_j a_j
+/// ```
 ///
 /// and the right-hand correction does not depend on the row. So the loop
 /// accumulates the biased product directly and the bias is removed once, at the

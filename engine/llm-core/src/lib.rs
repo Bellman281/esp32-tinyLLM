@@ -17,8 +17,10 @@ pub mod rope;
 pub mod scratch;
 pub mod tensor;
 
+pub use attention::HeadsJob;
 pub use model::{
     llm_forward, llm_forward_profiled, llm_forward_profiled_with_matvec_override,
+    llm_forward_profiled_with_overrides, llm_forward_with_attn_override,
     llm_forward_with_head_override, llm_forward_with_matvec_override, Layer, Model, MAX_LAYERS,
 };
 pub use profile::Profile;
