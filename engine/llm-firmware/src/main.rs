@@ -388,6 +388,29 @@ fn main() {
             }
         );
         }
+
+        // Instructions or stalls? See Head::probe_dot_cycles.
+        #[cfg(feature = "bandwidth-probe")]
+        {
+            // SAFETY: generation has not started; `scratch.logits` is ours
+            // alone and is sized for the full padded vocab, which is >= rows.
+            let (warm, cold) = unsafe { head.probe_dot_cycles(scratch.logits.as_mut_ptr()) };
+            println!(
+                "head dot: {warm:.2} cycles/MAC cache-resident, {cold:.2} streaming \
+                 ({:+.0}%)",
+                (cold / warm - 1.0) * 100.0
+            );
+            println!(
+                "  => {}",
+                if cold / warm > 1.25 {
+                    "waiting for memory; the lever is overlapping the loads \
+                     (software pipelining), not a shorter loop"
+                } else {
+                    "issue-bound; the lever is fewer instructions per MAC, and \
+                     load-use latency is already covered"
+                }
+            );
+        }
     }
     println!();
     let _ = std::io::stdout().flush();

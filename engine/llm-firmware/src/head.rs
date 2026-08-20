@@ -746,6 +746,57 @@ impl Head {
         (half * 2, mbs, own_us, worker_us)
     }
 
+    /// Is the head's inner loop limited by instructions or by waiting for
+    /// memory? Returns `(cache-resident cycles/MAC, streaming cycles/MAC)`.
+    ///
+    /// The head spends 41.9 ms/token on non-memory time for roughly 6.1M
+    /// instructions -- about 1.65 cycles per instruction on a core that issues
+    /// one. Either the loop is stalling on load-use latency, or the
+    /// instruction count is higher than counting mnemonics suggests. Those
+    /// call for opposite fixes: software pipelining versus a shorter loop.
+    ///
+    /// The distinguishing measurement is free of new machinery. Run the SAME
+    /// `rows_range` over a row range small enough to stay in the 64 KB data
+    /// cache and repeat it; every load hits. Compare against one pass over all
+    /// rows, where the weights stream from PSRAM and nothing is reused. If the
+    /// two rates match, the loop is issue-bound and the fix is fewer
+    /// instructions. If the cache-resident rate is markedly faster, it is
+    /// waiting for memory and the fix is to overlap the waiting.
+    ///
+    /// Single-core on purpose: the point is per-core issue rate, and running
+    /// both would fold bus contention back in -- the thing being controlled
+    /// for. Timing is data-independent (integer multiply-accumulate over a
+    /// fixed shape), so the zeroed activation scratch at boot is fine.
+    ///
+    /// # Safety
+    /// `y` must point to a valid `[f32; self.rows]` this call may write.
+    #[cfg(feature = "bandwidth-probe")]
+    pub unsafe fn probe_dot_cycles(&self, y: *mut f32) -> (f64, f64) {
+        const CPU_HZ: f64 = 240_000_000.0;
+        // 12 KB of weights against a 64 KB data cache: resident after the
+        // first pass, and small enough that the scale array rides along.
+        let warm_rows = 256.min(self.rows);
+        let reps = 64;
+
+        // Prime, so the first timed pass is not paying the misses.
+        let _ = unsafe { self.rows_range(y, 0, warm_rows) };
+        let t0 = unsafe { esp_timer_get_time() };
+        for _ in 0..reps {
+            let _ = unsafe { self.rows_range(y, 0, warm_rows) };
+        }
+        let t1 = unsafe { esp_timer_get_time() };
+        let warm_macs = (reps * warm_rows * self.cols) as f64;
+        let warm_cyc = (t1 - t0) as f64 * 1e-6 * CPU_HZ / warm_macs;
+
+        let t2 = unsafe { esp_timer_get_time() };
+        let _ = unsafe { self.rows_range(y, 0, self.rows) };
+        let t3 = unsafe { esp_timer_get_time() };
+        let cold_macs = (self.rows * self.cols) as f64;
+        let cold_cyc = (t3 - t2) as f64 * 1e-6 * CPU_HZ / cold_macs;
+
+        (warm_cyc, cold_cyc)
+    }
+
     /// The staged row count (== `vocab_n` passed to `stage_and_spawn`).
     /// Not read anywhere in this crate today (`main` gets `vocab_n`
     /// straight from `vocab::vocab_n()`, the same value, before `Head`
