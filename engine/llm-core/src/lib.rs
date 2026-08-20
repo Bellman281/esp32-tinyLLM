@@ -21,9 +21,10 @@ pub mod tensor;
 pub use attention::HeadsJob;
 pub use digest::TokenDigest;
 pub use model::{
-    llm_forward, llm_forward_profiled, llm_forward_profiled_with_matvec_override,
-    llm_forward_profiled_with_overrides, llm_forward_with_attn_override,
-    llm_forward_with_head_override, llm_forward_with_matvec_override, Layer, Model, MAX_LAYERS,
+    llm_forward, llm_forward_fp16_kv, llm_forward_fp16_kv_with_head_override, llm_forward_profiled,
+    llm_forward_profiled_with_matvec_override, llm_forward_profiled_with_overrides,
+    llm_forward_with_attn_override, llm_forward_with_head_override,
+    llm_forward_with_matvec_override, Layer, Model, MAX_LAYERS,
 };
 pub use profile::Profile;
 pub use scratch::{sizes as scratch_sizes, Scratch, ScratchSizes};

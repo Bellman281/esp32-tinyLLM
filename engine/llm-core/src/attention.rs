@@ -65,13 +65,70 @@ pub fn store_kv(
     head_dim: usize,
     seq_len: usize,
 ) {
+    store_kv_prec(
+        k,
+        v,
+        kcache_layer,
+        vcache_layer,
+        pos,
+        n_heads,
+        head_dim,
+        seq_len,
+        false,
+    )
+}
+
+/// `store_kv`, optionally rounding each cached value through `f16` first.
+///
+/// WHAT `fp16` MEASURES, AND WHY IT IS A ROUND-TRIP RATHER THAN A CACHE.
+/// On the ESP32-S3 the KV cache lives in PSRAM, and the dual-core bandwidth
+/// probe (`Head::probe_weight_bandwidth_dual`) found that a second core buys
+/// only 1.27x more bandwidth, not 2x. Attention reads the whole cache every
+/// token -- ~1.01 MB at the benchmark settings, nearly as much as the entire
+/// output head -- which puts **70% of the `core` sub-stage's time in pure
+/// transfer**, against 21% for the head. Halving the cache would be the
+/// largest win left.
+///
+/// It would also be the first change in this port that is not bit-exact, so
+/// the cost has to be measured before the benefit is chased -- the same order
+/// `matvec_simd_tolerance.rs` established for SIMD reordering. Rounding
+/// through `f16` on the way in reproduces the arithmetic of an `f16` cache
+/// *exactly*: a real one would round on store and widen on load, and every
+/// dot product downstream would still run in `f32` over precisely these
+/// values. So this measures the numerical cost without changing a single
+/// buffer type, which keeps the experiment from carrying a rewrite's worth of
+/// risk.
+///
+/// It deliberately does NOT measure the speed. The bytes are unchanged here;
+/// the saving is a device-side property already estimated from the probe.
+#[allow(clippy::too_many_arguments)]
+pub fn store_kv_prec(
+    k: &[f32],
+    v: &[f32],
+    kcache_layer: &mut [f32],
+    vcache_layer: &mut [f32],
+    pos: usize,
+    n_heads: usize,
+    head_dim: usize,
+    seq_len: usize,
+    fp16: bool,
+) {
     // Per-head strided write; see the layout note above.
     for hh in 0..n_heads {
         let base = hh * seq_len * head_dim + pos * head_dim;
-        kcache_layer[base..base + head_dim]
-            .copy_from_slice(&k[hh * head_dim..hh * head_dim + head_dim]);
-        vcache_layer[base..base + head_dim]
-            .copy_from_slice(&v[hh * head_dim..hh * head_dim + head_dim]);
+        let ks = &k[hh * head_dim..hh * head_dim + head_dim];
+        let vs = &v[hh * head_dim..hh * head_dim + head_dim];
+        if fp16 {
+            for (dst, &src) in kcache_layer[base..base + head_dim].iter_mut().zip(ks) {
+                *dst = half::f16::from_f32(src).to_f32();
+            }
+            for (dst, &src) in vcache_layer[base..base + head_dim].iter_mut().zip(vs) {
+                *dst = half::f16::from_f32(src).to_f32();
+            }
+        } else {
+            kcache_layer[base..base + head_dim].copy_from_slice(ks);
+            vcache_layer[base..base + head_dim].copy_from_slice(vs);
+        }
     }
 }
 
