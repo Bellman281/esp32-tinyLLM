@@ -352,3 +352,24 @@ attn_rope = 0.15
 attn_core = 15.6
 attn_proj = 2.7
 attn_dual = "qkv proj core"
+
+[run.rust-fast-mspi]
+label   = "Rust, --fast-mspi"
+engine  = "rust"
+date    = "2026-08-20"
+commit  = "build(firmware): make the 120 MHz MSPI clock an opt-in overlay (881efec)"
+experimental = 1
+experimental_note = "One flag from the default build -- scripts/run_device.sh --fast-mspi -- and not the default, for reasons about other boards rather than this one: CONFIG_IDF_EXPERIMENTAL_FEATURES, Espressif documenting 120 MHz as temperature-sensitive, and this board's boya flash part refusing it and falling back. Bit-exact: 102.6 ms/token, 9.75 tok/s, 18.9% faster than the C reference, digest 0x327578cb136fd6aa OK."
+note    = "Confirms the overlay mechanism works: ESP_IDF_SDKCONFIG_DEFAULTS composes the base file and sdkconfig.defaults.fast-mspi, and the boot log reads 'esp_psram: Speed: 120MHz'. 0.3 ms better than [run.rust-mspi120] measured the same config from a different branch tip, which is the layout tax. Single-core probe reads 75 MB/s here against 81 in that binary and 68/72/73 in the 80 MHz ones -- a fourth data point saying no single bandwidth figure on this board should be read to better than ~5%."
+input   = 3.8
+attn    = 24.7
+ffn     = 6.0
+ple     = 7.3
+head    = 60.9
+wall_ms = 102.6
+tok_s   = 9.75
+attn_qkv  = 7.5
+attn_rope = 0.15
+attn_core = 14.5
+attn_proj = 2.6
+attn_dual = "qkv proj core"

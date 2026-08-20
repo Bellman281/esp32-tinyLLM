@@ -1,0 +1,34 @@
+# OPT-IN: run the MSPI bus at 120 MHz. Worth 3.4 ms/token (106.3 -> 102.9,
+# 9.41 -> 9.71 tok/s, 14.8% -> 18.6% faster than the C reference). Bit-exact:
+# the firmware's token digest is unchanged, because a clock cannot alter an
+# arithmetic result.
+#
+#   scripts/run_device.sh --fast-mspi
+#
+# NOT THE DEFAULT, for three reasons that are about other people's boards
+# rather than about this one:
+#
+#   1. It requires CONFIG_IDF_EXPERIMENTAL_FEATURES. Espressif gates 120 MHz
+#      behind that flag because they document it as temperature-sensitive and
+#      do not recommend it across the industrial temperature range.
+#   2. PSRAM and flash share the MSPI peripheral, so this raises both. There is
+#      no way to raise one alone: at the 240 MHz core clock that 120M PSRAM
+#      implies, ESP-IDF ships no 80M-flash timing table and the build fails
+#      outright saying so.
+#   3. This board's flash is a "boya" part, which is not in Espressif's
+#      validated set. It logs
+#
+#        W flash HPM: High performance mode of this flash model hasn't been
+#                     supported.
+#
+#      and falls back rather than running at 120. So the measured win comes
+#      from the shared MSPI core clock, not from the flash module clock --
+#      a separate experiment raising flash 40 -> 80 with PSRAM unchanged
+#      measured 106.6 ms, i.e. nothing at all.
+#
+# If the board browns out, hangs after "cpu_start: Multicore app", or the token
+# digest reports MISMATCH, stop using this file. A bandwidth ceiling you cannot
+# reach reliably is a finding, not a configuration.
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+CONFIG_SPIRAM_SPEED_120M=y
+CONFIG_ESPTOOLPY_FLASHFREQ_120M=y
