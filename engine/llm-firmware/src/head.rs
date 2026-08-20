@@ -46,7 +46,7 @@ use core::sync::atomic::{AtomicI32, AtomicPtr, AtomicU32, AtomicUsize, Ordering}
 use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::hal::sys::{esp_timer_get_time, TaskHandle_t, TickType_t};
 use esp_idf_svc::hal::task;
-use llm_core::{activation_sum_i16, dot_int4_int16, quantize_activations_i16, QT};
+use llm_core::{activation_sum_i16, dot2_int4_int16, quantize_activations_i16, QT};
 
 use crate::psram;
 
@@ -305,14 +305,52 @@ impl Head {
         let actq: &[i16] = &actq_all[..cols];
         let acts = f32::from_bits(self.acts.load(Ordering::Acquire));
         let act_sum = self.act_sum.load(Ordering::Acquire);
-        for r in r0..r1 {
+        // TWO ROWS PER PASS. The activation vector is identical for all
+        // 25,353 rows, and doing one row at a time reloads it for every one --
+        // 2.43M `l16si` per token to read 96 distinct values. The head's loop
+        // measured issue-bound (8.96 cycles/MAC cache-resident against 9.64
+        // streaming, only 8% apart), so instruction count is the lever and
+        // this removes one load per two multiply-accumulates.
+        //
+        // Bit-exact: the two rows share a load and nothing else. Same terms,
+        // same order, same lanes, same hoisted bias -- asserted on every
+        // consecutive row pair of the shipped model by
+        // llm-host/tests/dot2_equivalence.rs.
+        let mut r = r0;
+        while r + 1 < r1 {
+            let (acc_a, acc_b) = dot2_int4_int16(
+                &w4[r * rb..r * rb + rb],
+                &w4[(r + 1) * rb..(r + 1) * rb + rb],
+                actq,
+                act_sum,
+            );
+            for (rr, acc) in [(r, acc_a), (r + 1, acc_b)] {
+                let val = acc as f32 * scale8[rr] * acts;
+                // SAFETY: caller's contract -- `y[r0..r1]` is this call's alone.
+                unsafe { core::ptr::write(y.add(rr), val) };
+                // Strictly `>`, so the LOWEST index wins a tie, and the pair is
+                // visited in increasing order -- same token a 0..n scan picks.
+                if val > best_val {
+                    best_val = val;
+                    best_idx = rr;
+                }
+            }
+            r += 2;
+        }
+        // An odd row count leaves one row over.
+        for r in r..r1 {
             // Two codes per byte, unpacked in the loop instead of at boot.
             // `llm_core::dot_int4_int8` is asserted bit-for-bit equal to the
             // staged-int8 dot over every row of the shipped model by
             // llm-host/tests/int4_head_equivalence.rs -- integer addition is
             // associative and every term is the same term, so this is exact,
             // not approximate.
-            let acc = dot_int4_int16(&w4[r * rb..r * rb + rb], actq, act_sum);
+            let (acc, _) = dot2_int4_int16(
+                &w4[r * rb..r * rb + rb],
+                &w4[r * rb..r * rb + rb],
+                actq,
+                act_sum,
+            );
             let val = acc as f32 * scale8[r] * acts;
             // SAFETY: caller's contract (see this fn's doc comment) is that
             // `y[r0..r1]` is this call's alone to write.

@@ -668,6 +668,90 @@ pub fn dot_int4_int16(row_codes: &[u8], actq: &[i16], act_sum: i32) -> i32 {
     acc - 8 * act_sum
 }
 
+/// Two rows at once, against one activation vector.
+///
+/// WHY. The head's inner loop was measured **issue-bound** on the ESP32-S3:
+/// 8.96 cycles per multiply-accumulate with the weights resident in the data
+/// cache, against 9.64 streaming from PSRAM — only 8% apart, so the four
+/// accumulator chains already cover load-use latency and the only lever left
+/// is fewer instructions per MAC.
+///
+/// One instruction is free for the taking. The activation vector is the *same*
+/// for all 25,353 rows, and `dot_int4_int16` reloads it for every one of them
+/// — 2.43M `l16si` per token to read 96 distinct values. Doing two rows in one
+/// pass loads each activation once and uses it twice:
+///
+/// ```text
+/// per 4 MACs, one row at a time      per 4 MACs, two rows at once
+///   2x l8ui   (weight bytes)           2x l8ui   (one per row)
+///   4x extract (nibbles)               4x extract
+///   4x l16si  (activations)            2x l16si   <-- halved
+///   4x mull                            4x mull
+///   4x add                             4x add
+/// ```
+///
+/// Roughly 18 instructions down to 16 per four MACs, on a loop that runs 2.43M
+/// times per token.
+///
+/// BIT-EXACT. Each row's accumulation is untouched — same terms, same order,
+/// same four-lane split, same hoisted bias. The two rows never interact; they
+/// merely share a load. `llm-host/tests/dot2_equivalence.rs` asserts both
+/// returned values against `dot_int4_int16` on every row pair of the shipped
+/// model.
+///
+/// Returns `(dot for row_a, dot for row_b)`. Both rows must have the same
+/// length, which for a `QT` they always do.
+#[inline]
+pub fn dot2_int4_int16(row_a: &[u8], row_b: &[u8], actq: &[i16], act_sum: i32) -> (i32, i32) {
+    let cols = actq.len();
+    let pairs = cols / 2;
+    let blocks = pairs / DOT_LANES;
+    let mut lanes_a = [0i32; DOT_LANES];
+    let mut lanes_b = [0i32; DOT_LANES];
+    let bytes_a = &row_a[..blocks * DOT_LANES];
+    let bytes_b = &row_b[..blocks * DOT_LANES];
+    let acts = &actq[..blocks * DOT_LANES * 2];
+    for ((ba, bb), aq) in bytes_a
+        .chunks_exact(DOT_LANES)
+        .zip(bytes_b.chunks_exact(DOT_LANES))
+        .zip(acts.chunks_exact(DOT_LANES * 2))
+    {
+        for l in 0..DOT_LANES {
+            // Each activation is read into a register once and multiplied
+            // twice. That is the entire point of this function.
+            let a0 = aq[2 * l] as i32;
+            let a1 = aq[2 * l + 1] as i32;
+            let wa = ba[l];
+            let wb = bb[l];
+            lanes_a[l] += (wa & 0xF) as i32 * a0;
+            lanes_a[l] += (wa >> 4) as i32 * a1;
+            lanes_b[l] += (wb & 0xF) as i32 * a0;
+            lanes_b[l] += (wb >> 4) as i32 * a1;
+        }
+    }
+    let mut half = DOT_LANES;
+    while half > 1 {
+        half /= 2;
+        for l in 0..half {
+            lanes_a[l] += lanes_a[l + half];
+            lanes_b[l] += lanes_b[l + half];
+        }
+    }
+    let (mut acc_a, mut acc_b) = (lanes_a[0], lanes_b[0]);
+    let done = blocks * DOT_LANES;
+    for p in done..pairs {
+        let (a0, a1) = (actq[2 * p] as i32, actq[2 * p + 1] as i32);
+        acc_a += (row_a[p] & 0xF) as i32 * a0 + (row_a[p] >> 4) as i32 * a1;
+        acc_b += (row_b[p] & 0xF) as i32 * a0 + (row_b[p] >> 4) as i32 * a1;
+    }
+    if cols % 2 == 1 {
+        let a = actq[cols - 1] as i32;
+        acc_a += (row_a[pairs] & 0xF) as i32 * a;
+        acc_b += (row_b[pairs] & 0xF) as i32 * a;
+    }
+    (acc_a - 8 * act_sum, acc_b - 8 * act_sum)
+}
+
 /// int8-activation dot against a row of **already-unpacked int8 weights**.
 ///
 /// The counterpart to `dot_int4_int8`, and the arm of an experiment rather
