@@ -42,11 +42,11 @@
 //! host-side test can exercise (there's no FreeRTOS on the host).
 
 use core::cell::{Cell, UnsafeCell};
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::hal::sys::{esp_timer_get_time, TaskHandle_t, TickType_t};
 use esp_idf_svc::hal::task;
-use llm_core::{dot_int4_int8, quantize_activations, QT};
+use llm_core::{activation_sum, dot_int4_int8, quantize_activations, QT};
 
 use crate::psram;
 
@@ -82,6 +82,10 @@ pub struct Head {
     // after the worker is done reading it. See the module doc comment.
     actq: UnsafeCell<[i8; MAX_HEAD_COLS]>,
     acts: AtomicU32, // f32 bits (no AtomicF32 in core)
+    // Sum of `actq`, written with it and read by both cores for every row --
+    // see llm_core::dot_int4_int8 for why one number per token replaces one
+    // subtract per element.
+    act_sum: AtomicI32,
 
     // The current job's output pointer and row split, set by `matvec`
     // before notifying the worker.
@@ -141,6 +145,7 @@ impl Head {
         let actq_all: &[i8; MAX_HEAD_COLS] = unsafe { &*self.actq.get() };
         let actq: &[i8] = &actq_all[..cols];
         let acts = f32::from_bits(self.acts.load(Ordering::Acquire));
+        let act_sum = self.act_sum.load(Ordering::Acquire);
         for r in r0..r1 {
             // Two codes per byte, unpacked in the loop instead of at boot.
             // `llm_core::dot_int4_int8` is asserted bit-for-bit equal to the
@@ -148,7 +153,7 @@ impl Head {
             // llm-host/tests/int4_head_equivalence.rs -- integer addition is
             // associative and every term is the same term, so this is exact,
             // not approximate.
-            let acc = dot_int4_int8(&w4[r * rb..r * rb + rb], actq);
+            let acc = dot_int4_int8(&w4[r * rb..r * rb + rb], actq, act_sum);
             let val = acc as f32 * scale8[r] * acts;
             // SAFETY: caller's contract (see this fn's doc comment) is that
             // `y[r0..r1]` is this call's alone to write.
@@ -180,6 +185,9 @@ impl Head {
             &mut arr[..self.cols]
         };
         let scale = quantize_activations(&x[..self.cols], actq);
+        // Relaxed: the Release on `acts` immediately below publishes both, the
+        // same way it already publishes `actq`.
+        self.act_sum.store(activation_sum(actq), Ordering::Relaxed);
         self.acts.store(scale.to_bits(), Ordering::Release);
 
         // Capture the raw pointer once; from here on both this core and
@@ -366,6 +374,7 @@ pub fn stage_and_spawn(tok_emb: QT<'static>, vocab_n: usize) -> Result<&'static 
         row_bytes,
         actq: UnsafeCell::new([0i8; MAX_HEAD_COLS]),
         acts: AtomicU32::new(0),
+        act_sum: AtomicI32::new(0),
         job_y: core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),
         job_split: AtomicUsize::new(0),
         worker: Cell::new(core::ptr::null_mut()),

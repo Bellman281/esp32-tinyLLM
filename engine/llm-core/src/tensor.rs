@@ -514,63 +514,68 @@ impl<'a> QT<'a> {
 /// `actq` the quantized activations (`cols` of them). Assumes `n_groups == 1`
 /// for the row — the same contract `unpack_row_int8` documents, and true of
 /// every shipped model's `tok_emb` (`group = 128 >= cols = 96`).
-/// Independent accumulators in `dot_int4_int8`. Four, because that is what
-/// breaks the dependency chain without needing more live registers than the
-/// LX7 comfortably has.
+/// Independent accumulators in `dot_int4_int8`. Four -- enough to break the
+/// dependency chain without needing more live registers than the LX7 has to
+/// spare.
 ///
-/// WHY. Both this and the C reference's `dot_i8` accumulate into ONE variable,
-/// so every iteration's add waits on the previous one. On the ESP32-S3 the
-/// head measured ~18 cycles per multiply-accumulate (91.0 ms for 2.43M MACs
-/// across two cores at 240 MHz) while using 19% of the memory bandwidth the
-/// same firmware measures on the same buffer -- so it is not starved for
-/// bytes, and 18 cycles is far more than the instructions require. Latency
-/// stalls on that chain are the obvious remaining candidate.
-///
-/// Four accumulators means four chains progressing in parallel, so the adds
-/// interleave instead of queueing.
-///
-/// This showed nothing on x86 when measured in isolation, because LLVM
-/// auto-vectorises the single-accumulator loop there and has already broken
-/// the chain. Xtensa has no autovectorisation, so the chain survives -- which
-/// is why a host measurement was worth ignoring here.
-///
-/// EXACT. `i32` addition is associative, and regrouping a finite integer sum
-/// cannot change it. No term is dropped or reordered into a different value;
-/// only the bracketing moves. `llm-host/tests/int4_head_equivalence.rs`
-/// asserts the result against the unpacked-int8 dot over every row of the real
-/// model, so this stays a proof rather than an argument.
+/// Both this and the C reference's `dot_i8` originally accumulated into ONE
+/// variable, so every iteration's add waited on the previous one. Splitting it
+/// four ways took the head 91.0 -> 81.3 ms on device (-10.7%). Real, but far
+/// short of what the stall theory predicted, which is what prompted looking at
+/// the rest of the loop body -- see `dot_int4_int8`.
 const DOT_LANES: usize = 4;
 
-/// int8-activation dot product against a row of **packed int4 codes**, without
-/// unpacking the row first. Returns the raw `i32` accumulation; the caller
-/// applies the row scale and the activation scale, exactly as
-/// `matvec_int8_activations` does.
-///
-/// WHY THIS EXISTS. `llm-firmware` stages the tied output head into PSRAM at
-/// boot. Staging it as unpacked int8 (what the C reference's `stage_head_int8`
-/// does) doubles what the head streams per token, 2.54 MB against 1.32 MB, and
-/// costs 1.2 MB of PSRAM. Reading the packed nibbles directly halves both.
-///
-/// Measured on device, that trade trades: the head did not get faster, because
-/// it turned out not to be bandwidth-bound. It is kept for the PSRAM and
-/// because it makes the arithmetic the only thing left to attack -- see
-/// `DOT_LANES` above for the attack.
-///
-/// EXACT, not approximate: every term is identical to the one the unpacked
-/// path produces and `i32` addition is associative, so this returns bit-for-bit
-/// what a dot over the staged int8 row returns.
-///
-/// `row_codes` is one row of `QT::codes` (`row_bytes = ceil(cols/2)` bytes) and
-/// `actq` the quantized activations (`cols` of them). Assumes `n_groups == 1`
-/// for the row -- the same contract `unpack_row_int8` documents, and true of
-/// every shipped model's `tok_emb` (`group = 128 >= cols = 96`).
+/// Sum of the quantized activations, as `i32`. Hoisted out of the per-row dot
+/// by the identity in `dot_int4_int8`; compute once per token and pass it to
+/// every row.
 #[inline]
-pub fn dot_int4_int8(row_codes: &[u8], actq: &[i8]) -> i32 {
+pub fn activation_sum(actq: &[i8]) -> i32 {
+    let mut s = 0i32;
+    for &a in actq {
+        s += a as i32;
+    }
+    s
+}
+
+/// int8-activation dot against a row of **packed int4 codes**, without
+/// unpacking the row first. `act_sum` is `activation_sum(actq)`, the same value
+/// for every row of a given token. Returns the raw `i32` accumulation; the
+/// caller applies the row scale and the activation scale.
+///
+/// THE INNER LOOP HAS NO SUBTRACT AND NO TABLE. Codes are stored biased
+/// (`nibble = value + 8`), so the obvious form is `(nibble - 8) * a`. But
+///
+///     sum_j (c_j - 8) * a_j  ==  sum_j c_j * a_j  -  8 * sum_j a_j
+///
+/// and the right-hand correction does not depend on the row. So the loop
+/// accumulates the biased product directly and the bias is removed once, at the
+/// end, for all 96 elements at a time. That deletes one operation per element
+/// across 2.43M elements per token.
+///
+/// It also deletes the `NIBBLE_I8` lookup this function used to do. That table
+/// is worth its keep in the fp32 paths, where it replaces an integer-to-float
+/// conversion with a load. Here it was replacing a subtract with a load, which
+/// is a worse instruction on every machine -- the pattern was copied from
+/// `matvec_range` without re-deriving whether it still applied. It did not.
+///
+/// What remains per element: extract a nibble, sign-extend an activation,
+/// multiply, accumulate into one of `DOT_LANES` chains.
+///
+/// EXACT. Integer arithmetic throughout, and the identity is exact over the
+/// integers, not an approximation of it. No overflow: codes are 0..=15,
+/// activations -127..=127, `cols <= 128`, so the biased sum is bounded by
+/// 15*127*128 = 243,840 and the correction by 8*127*128 = 130,048 -- both far
+/// inside `i32`. `llm-host/tests/int4_head_equivalence.rs` asserts the result
+/// against the unpacked-int8 dot over every row of the real model.
+///
+/// `row_codes` is one row of `QT::codes` (`row_bytes = ceil(cols/2)` bytes),
+/// `actq` the quantized activations (`cols` of them). Assumes `n_groups == 1`
+/// for the row, the same contract `unpack_row_int8` documents.
+#[inline]
+pub fn dot_int4_int8(row_codes: &[u8], actq: &[i8], act_sum: i32) -> i32 {
     let cols = actq.len();
     let pairs = cols / 2;
 
-    // Each block is DOT_LANES packed bytes -> 2*DOT_LANES elements, spread so
-    // that lane L only ever accumulates into itself.
     let blocks = pairs / DOT_LANES;
     let mut lanes = [0i32; DOT_LANES];
     let bytes = &row_codes[..blocks * DOT_LANES];
@@ -581,14 +586,13 @@ pub fn dot_int4_int8(row_codes: &[u8], actq: &[i8]) -> i32 {
     {
         for l in 0..DOT_LANES {
             let b = bq[l];
-            lanes[l] += NIBBLE_I8[(b & 0xF) as usize] as i32 * aq[2 * l] as i32;
-            lanes[l] += NIBBLE_I8[(b >> 4) as usize] as i32 * aq[2 * l + 1] as i32;
+            lanes[l] += (b & 0xF) as i32 * aq[2 * l] as i32;
+            lanes[l] += (b >> 4) as i32 * aq[2 * l + 1] as i32;
         }
     }
 
-    // Pairwise combine rather than a running sum: same value either way for
-    // integers, one less serial step.
-    let mut acc = 0i32;
+    // Pairwise combine: same value as a running sum for integers, one less
+    // serial step.
     let mut half = DOT_LANES;
     while half > 1 {
         half /= 2;
@@ -596,18 +600,19 @@ pub fn dot_int4_int8(row_codes: &[u8], actq: &[i8]) -> i32 {
             lanes[l] += lanes[l + half];
         }
     }
-    acc += lanes[0];
+    let mut acc = lanes[0];
 
-    // Tail: whole bytes the blocking did not cover, then a final odd element.
     for (k, b) in row_codes[blocks * DOT_LANES..pairs].iter().enumerate() {
         let j = (blocks * DOT_LANES + k) * 2;
-        acc += NIBBLE_I8[(b & 0xF) as usize] as i32 * actq[j] as i32;
-        acc += NIBBLE_I8[(b >> 4) as usize] as i32 * actq[j + 1] as i32;
+        acc += (b & 0xF) as i32 * actq[j] as i32;
+        acc += (b >> 4) as i32 * actq[j + 1] as i32;
     }
     if cols & 1 == 1 {
-        acc += NIBBLE_I8[(row_codes[pairs] & 0xF) as usize] as i32 * actq[cols - 1] as i32;
+        acc += (row_codes[pairs] & 0xF) as i32 * actq[cols - 1] as i32;
     }
-    acc
+
+    // The whole row's bias, removed once.
+    acc - 8 * act_sum
 }
 
 /// A plain fp32 vector view (norm weights etc.), stored as raw little-endian

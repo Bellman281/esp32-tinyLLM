@@ -17,7 +17,7 @@
 //! the stream actually beats the unpack cost on an LX7. That is a memory-system
 //! question this machine cannot answer.
 
-use llm_core::{dot_int4_int8, quantize_activations, Model};
+use llm_core::{activation_sum, dot_int4_int8, quantize_activations, Model};
 use llm_host::manifest;
 
 fn model_bytes() -> Vec<u8> {
@@ -51,6 +51,8 @@ fn int4_head_matches_the_staged_int8_head_bit_for_bit() {
         let x: Vec<f32> = (0..cols).map(|j| f(j)).collect();
         let mut actq = vec![0i8; cols];
         let act_scale = quantize_activations(&x, &mut actq);
+        // Hoisted out of the per-row dot; see dot_int4_int8's identity.
+        let act_sum = activation_sum(&actq);
 
         let mut staged = vec![0i8; cols];
         for r in 0..head.rows {
@@ -63,7 +65,7 @@ fn int4_head_matches_the_staged_int8_head_bit_for_bit() {
 
             // Path B: read the packed nibbles directly.
             let (codes, row_scale_b) = head.packed_row(r);
-            let dot_b = dot_int4_int8(codes, &actq);
+            let dot_b = dot_int4_int8(codes, &actq, act_sum);
 
             assert_eq!(row_scale_a.to_bits(), row_scale_b.to_bits(),
                        "case {ci} row {r}: row scale differs");
