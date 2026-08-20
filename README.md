@@ -51,7 +51,12 @@ On a board: `cd engine/llm-firmware && cargo run --release`.
 </picture>
 
 Both firmwares emit **byte-identical text** — same 400 tokens, cut off at the same
-word.
+word. The board proves it rather than being taken at its word: it folds every
+token id it emits into a digest and prints it, and
+[`model/models.toml`](./model/models.toml) pins the value that
+`llm-host/tests/token_stream_digest.rs` recomputes on the host. A run that
+diverges by one token says so, loudly, in the same output as the timings — and
+a firmware that is fast because it computes something else is not a result.
 
 <!-- BEGIN device-table (generated: scripts/plot_stages.py --inject) -->
 
@@ -71,19 +76,21 @@ word.
 | **+ argmax/stdout** | 3.8 | 39.8 | 6.0 | 7.3 | 61.5 | 118.4 | **121.1** | 8.25 |
 | **+ argmax in head** | 3.9 | 40.0 | 6.1 | 7.5 | 61.5 | 119.0 | **119.0** | 8.40 |
 | **+ attn instrumented** | 3.9 | 39.0 | 6.2 | 7.6 | 61.9 | 118.6 | **118.5** | 8.43 |
-| **Rust, now** | 3.9 | 26.4 | 6.2 | 7.6 | 62.7 | 106.8 | **106.8** | 9.36 |
-| ratio vs C reference | 0.89x | 0.62x | 0.90x | 0.89x | 1.10x | 0.89x | **0.88x** | |
-| absolute gap | -0.5 | -16.5 | -0.7 | -0.9 | +5.6 | -13.0 | **-15.2** | |
-| **change this brought** | +0.0 | -12.6 | +0.0 | +0.0 | +0.8 | -11.8 | **-11.7** | |
+| **+ attn heads split** | 3.9 | 26.4 | 6.2 | 7.6 | 62.7 | 106.8 | **106.8** | 9.36 |
+| **Rust, now** | 3.9 | 26.3 | 6.2 | 7.6 | 62.3 | 106.3 | **106.3** | 9.41 |
+| ratio vs C reference | 0.89x | 0.61x | 0.90x | 0.89x | 1.09x | 0.89x | **0.87x** | |
+| absolute gap | -0.5 | -16.6 | -0.7 | -0.9 | +5.2 | -13.5 | **-15.7** | |
+| **change this brought** | +0.0 | -0.1 | +0.0 | +0.0 | -0.4 | -0.5 | **-0.5** | |
 
 **`attn` broken down** — the sub-stages the five-stage profile hides. `qkv`/`proj` are the fp32 matvec that also drives `ffn` and `ple`; `core` is attention proper, the only part that grows with sequence position. The C reference has no equivalent instrumentation, so it is absent rather than zero.
 
 | attn ms/token | qkv | rope | core | proj | sum | both cores |
 |---|---|---|---|---|---|---|
 | **+ attn instrumented** | 7.8 | 0.14 | 28.3 | 2.7 | 38.9 | `qkv`, `proj` |
-| **Rust, now** | 7.9 | 0.15 | 15.6 | 2.7 | 26.3 | `qkv`, `proj`, `core` |
+| **+ attn heads split** | 7.9 | 0.15 | 15.6 | 2.7 | 26.3 | `qkv`, `proj`, `core` |
+| **Rust, now** | 7.8 | 0.15 | 15.6 | 2.7 | 26.2 | `qkv`, `proj`, `core` |
 
-**Rust is 14.2% faster per token than the C reference it was ported from** — 106.8 ms against 122.0, 9.36 tok/s against 8.20, on the same board with byte-identical output. It beats C on 4 of the 5 stages.
+**Rust is 14.8% faster per token than the C reference it was ported from** — 106.3 ms against 122.0, 9.41 tok/s against 8.20, on the same board with byte-identical output. It beats C on 4 of the 5 stages.
 
 <!-- END device-table -->
 

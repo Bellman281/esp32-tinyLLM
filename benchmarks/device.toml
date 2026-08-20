@@ -31,6 +31,7 @@ model_sha256 = "3e5870b42d54e9f3a58b7b7d2a483b6f85170b5732bc1af6ac21a488a7fa7bbe
 n_generate  = 400
 prompt_len  = 18
 note        = "attn is the only stage that scales with sequence position, so runs at different n_generate/prompt_len are NOT comparable. benchmark_settings_match.rs gates both firmwares to these values."
+parity = "Every Rust run from [run.rust-digest] onward is checked, not asserted: the firmware folds every emitted token id into llm_core::TokenDigest and prints it, and model/models.toml pins the value that llm-host/tests/token_stream_digest.rs recomputes through llm_forward_with_head_override with the head reproduced exactly as head.rs computes it. Earlier rows say byte-identical on the strength of someone reading the story; this one says it on the strength of 0x327578cb136fd6aa."
 reproducibility = "A given binary reproduces exactly on this board: two independent hard-reset runs of each of the two Rust binaries below returned the same wall clock to 0.01 s and the same per-stage figures to 0.1 ms, matching what the C firmware already did across three runs. So a single run per binary is enough, and there is no run-to-run noise floor to hide behind -- a per-stage difference between two binaries is real even in a stage neither of them touched. See BENCHMARKING.md, 'Reproducibility and the layout tax'."
 
 [run.c]
@@ -233,7 +234,7 @@ attn_proj = 2.7
 attn_dual = "qkv proj"
 
 [run.rust-attn-split]
-label   = "Rust, now"
+label   = "+ attn heads split"
 engine  = "rust"
 date    = "2026-08-20"
 commit  = "perf(attn): split attention heads across both cores (2dc3662)"
@@ -246,6 +247,25 @@ head    = 62.7
 wall_ms = 106.8
 tok_s   = 9.36
 attn_qkv  = 7.9
+attn_rope = 0.15
+attn_core = 15.6
+attn_proj = 2.7
+attn_dual = "qkv proj core"
+
+[run.rust-digest]
+label   = "Rust, now"
+engine  = "rust"
+date    = "2026-08-20"
+commit  = "test: make byte-identical output something the board asserts (eb39e59)"
+note    = "First run whose parity is verified rather than asserted: token digest 0x327578cb136fd6aa (418 tokens) OK, matching models.toml gen_digest. No arithmetic changed -- the -0.5 ms against [run.rust-attn-split] is the layout tax, this time in our favour, from adding the digest accumulator and its print. Recorded because this is the binary a release is cut from, and because crediting 0.5 ms to a change that computes nothing new is exactly the error the layout-tax section exists to prevent."
+input   = 3.9
+attn    = 26.3
+ffn     = 6.2
+ple     = 7.6
+head    = 62.3
+wall_ms = 106.3
+tok_s   = 9.41
+attn_qkv  = 7.8
 attn_rope = 0.15
 attn_core = 15.6
 attn_proj = 2.7
