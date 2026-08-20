@@ -19,6 +19,10 @@
 # argmax and serial output are outside the profiled stages). Quote tok/s from
 # `wall_ms`, never from the stage sum.
 #
+# `#` STARTS A COMMENT ANYWHERE ON A LINE, including inside a quoted value --
+# the reader strips it before parsing. So a value cannot contain `#`: write
+# "PR 22", not "#22". The failure is a confusing int() error, not a clear one.
+#
 # FORMAT: the same restricted TOML subset model/models.toml uses — `key = value`
 # inside a [section], values being quoted strings or numbers, `#` starting a
 # comment. Kept inside that subset so a shell or Python reader needs no TOML
@@ -277,7 +281,7 @@ engine  = "rust"
 date    = "2026-08-20"
 commit  = "exp(firmware): run the MSPI bus at 120 MHz -- PSRAM and flash together (da40739)"
 experimental = 1
-experimental_note = "Requires CONFIG_IDF_EXPERIMENTAL_FEATURES; Espressif documents 120 MHz as temperature-sensitive and not recommended across the industrial range, and this board's boya flash part refused it and fell back. Real, reproducible, bit-exact -- and not what you get by cloning this repo. Available as a +3.3% opt-in; see BENCHMARKING.md."
+experimental_note = "Requires CONFIG_IDF_EXPERIMENTAL_FEATURES; Espressif documents 120 MHz as temperature-sensitive and not recommended across the industrial range, and this board's boya flash part refused it and fell back. Real, reproducible, bit-exact -- and not what you get by cloning this repo. It was a +3.3% opt-in AT THE TIME; the engine has moved twice since, and [run.rust-fast-mspi-dot2] is the current measurement of the same flag."
 note    = "Config only, no code change, bit-exact -- token digest still 0x327578cb136fd6aa OK. PSRAM 80->120 MHz, which forces flash along with it because they share the MSPI peripheral and ESP-IDF has no 80M-flash timing table at the 240 MHz core clock that 120M PSRAM implies. Bandwidth: 1 core 72->81 MB/s, 2 cores 91->131, core scaling 1.27x->1.62x. NOT separately attributable by construction; a follow-up (exp/flash-80m) raised flash 40->80 with PSRAM left at 80 and measured 106.6 ms, i.e. NOTHING, which rules out the flash module clock as the cause and points at the shared MSPI core clock instead. EXPERIMENTAL: needs CONFIG_IDF_EXPERIMENTAL_FEATURES, is temperature-sensitive per Espressif, and this board's boya flash part logged 'High performance mode of this flash model hasn.t been supported' -- it refused 120 MHz flash and fell back. Do not copy into a product."
 input   = 3.6
 attn    = 24.5
@@ -354,12 +358,12 @@ attn_proj = 2.7
 attn_dual = "qkv proj core"
 
 [run.rust-fast-mspi]
-label   = "Rust, --fast-mspi"
+label   = "Rust, --fast-mspi (pre-i16)"
 engine  = "rust"
 date    = "2026-08-20"
 commit  = "build(firmware): make the 120 MHz MSPI clock an opt-in overlay (881efec)"
 experimental = 1
-experimental_note = "One flag from the default build -- scripts/run_device.sh --fast-mspi -- and not the default, for reasons about other boards rather than this one: CONFIG_IDF_EXPERIMENTAL_FEATURES, Espressif documenting 120 MHz as temperature-sensitive, and this board's boya flash part refusing it and falling back. Bit-exact: 102.6 ms/token, 9.75 tok/s, 18.9% faster than the C reference, digest 0x327578cb136fd6aa OK."
+experimental_note = "One flag from the default build -- scripts/run_device.sh --fast-mspi -- and not the default, for reasons about other boards rather than this one: CONFIG_IDF_EXPERIMENTAL_FEATURES, Espressif documenting 120 MHz as temperature-sensitive, and this board's boya flash part refusing it and falling back. Bit-exact: 102.6 ms/token, 9.75 tok/s, 18.9% faster than the C reference, digest 0x327578cb136fd6aa OK. SUPERSEDED as a description of the flag -- this was measured before i16 activations and two rows per pass, so it now reads slower than the shipping default. See [run.rust-fast-mspi-dot2] for the same flag on the current engine."
 note    = "Confirms the overlay mechanism works: ESP_IDF_SDKCONFIG_DEFAULTS composes the base file and sdkconfig.defaults.fast-mspi, and the boot log reads 'esp_psram: Speed: 120MHz'. 0.3 ms better than [run.rust-mspi120] measured the same config from a different branch tip, which is the layout tax. Single-core probe reads 75 MB/s here against 81 in that binary and 68/72/73 in the 80 MHz ones -- a fourth data point saying no single bandwidth figure on this board should be read to better than ~5%."
 input   = 3.8
 attn    = 24.7
@@ -430,4 +434,24 @@ attn_qkv  = 7.7
 attn_rope = 0.15
 attn_core = 16.5
 attn_proj = 2.7
+attn_dual = "qkv proj core"
+
+[run.rust-fast-mspi-dot2]
+label   = "Rust, --fast-mspi"
+engine  = "rust"
+date    = "2026-08-20"
+commit  = "3782fc5 (merge of PR 22), built via scripts/run_device.sh --fast-mspi"
+experimental = 1
+experimental_note = "The opt-in 120 MHz MSPI clock, re-measured on the current engine -- the earlier [run.rust-fast-mspi] row was taken before i16 activations and two rows per pass, and had gone stale enough to read as a downgrade. 91.8 ms/token, 10.89 tok/s: 3.6% under the shipping default's 95.2 and 24.8% under the C reference. The two effects compose, which is what you would expect of a memory-side change against two instruction-side ones -- the bus went 68 -> 75 MB/s on the probe and the head, which is compute-bound, moved only 49.7 -> 48.2 while attn (the stage that actually streams) took 27.1 -> 25.6. Still not the default: it needs CONFIG_IDF_EXPERIMENTAL_FEATURES, Espressif documents 120 MHz as temperature-sensitive outside the commercial range, and this board's boya flash part logs 'High performance mode of this flash model hasn't been supported' and stays at its own clock while PSRAM alone goes to 120. Bit-exact: digest 0x327578cb136fd6aa OK."
+input   = 3.9
+attn    = 25.6
+ffn     = 6.3
+ple     = 7.7
+head    = 48.2
+wall_ms = 91.8
+tok_s   = 10.89
+attn_qkv  = 8.0
+attn_rope = 0.15
+attn_core = 14.8
+attn_proj = 2.8
 attn_dual = "qkv proj core"

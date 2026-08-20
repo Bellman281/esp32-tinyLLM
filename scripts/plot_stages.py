@@ -35,6 +35,7 @@ all-pairs floors and more slots make it worse. Re-run the validator, do not
 re-pick by eye.
 """
 import argparse
+import re
 import os
 import sys
 
@@ -314,8 +315,34 @@ def attn_table(runs):
 BEGIN = "<!-- BEGIN device-table (generated: scripts/plot_stages.py --inject) -->"
 END = "<!-- END device-table -->"
 
+# Inline figures, for numbers that belong in the middle of a sentence and so
+# cannot live inside the block above.
+#
+# README.md's opening paragraph said "9.4 tok/s" for four measurements running,
+# because it was the one figure in the file the generator could not reach --
+# the block markers can only replace whole regions, and you cannot wrap a
+# paragraph's third word in a table. It is also the most-read number in the
+# repo. So: `<!--fig:tok_s-->10.50<!--/fig-->` renders as just the number on
+# GitHub, and `--inject` rewrites whatever sits between the markers.
+#
+# Values come from the same shipping run the headline uses, so an experimental
+# row cannot leak into the front page.
+FIG = re.compile(r"<!--fig:(\w+)-->.*?<!--/fig-->", re.S)
 
-def inject(paths, body):
+
+def inline_figures(runs):
+    ship = [rb for _, rb in runs if not rb.get("experimental")]
+    ref = next((rb for _, rb in runs if rb["engine"] == "c"), None)
+    now = ship[-1]
+    out = {"tok_s": f"{now['tok_s']:.2f}",
+           "wall_ms": f"{now['wall_ms']:.1f}",
+           "head_ms": f"{now['head']:.1f}"}
+    if ref:
+        out["pct_vs_c"] = f"{(ref['wall_ms'] / now['wall_ms'] - 1.0) * 100.0:.1f}"
+    return out
+
+
+def inject(paths, body, figs=None):
     """Replace the marked region in each file. No markers -> hard error.
 
     The point of the markers is that README.md and BENCHMARKING.md stop being
@@ -329,9 +356,22 @@ def inject(paths, body):
             sys.exit(f"plot_stages: {rel} has no {BEGIN} / {END} markers")
         head, rest = src.split(BEGIN, 1)
         _, tail = rest.split(END, 1)
-        open(f, "w", encoding="utf-8").write(
-            head + BEGIN + "\n\n" + body + "\n\n" + END + tail)
-        print(f"updated {rel}")
+        out = head + BEGIN + "\n\n" + body + "\n\n" + END + tail
+
+        n = 0
+        if figs:
+            def sub(m):
+                nonlocal n
+                key = m.group(1)
+                if key not in figs:
+                    sys.exit(f"plot_stages: {rel} asks for unknown figure "
+                             f"{key!r}; known: {', '.join(sorted(figs))}")
+                n += 1
+                return f"<!--fig:{key}-->{figs[key]}<!--/fig-->"
+            out = FIG.sub(sub, out)
+
+        open(f, "w", encoding="utf-8").write(out)
+        print(f"updated {rel}" + (f" ({n} inline)" if n else ""))
 
 
 def main():
@@ -359,7 +399,8 @@ def main():
         return
 
     if a.inject is not None:
-        inject(a.inject or ["README.md", "BENCHMARKING.md"], table(doc, runs))
+        inject(a.inject or ["README.md", "BENCHMARKING.md"],
+               table(doc, runs), inline_figures(runs))
         return
 
     # The table can hold every run; the chart cannot, and a chart with one bar
