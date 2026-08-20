@@ -530,6 +530,42 @@ first, and benchmark. An FFI call per row has real overhead at these row
 lengths (66–128 elements), so this is **not** a guaranteed win — it needs a
 before/after on hardware, not an assumption that SIMD is faster.
 
+### Function-level parity: reading both compilers' output
+
+Value equivalence is verified exactly and stage cost is measured, but for most
+of this project's life there was nothing between those two layers — no
+comparison of *this loop* against *that loop*. `scripts/disasm_head.sh` and
+`scripts/disasm_c.sh` compile both sides for the same target and dump the hot
+functions, which is the only way to answer "are the operations the same".
+
+The first look paid for itself immediately: an `l8ui` + `sext` pair on every
+activation read, because Xtensa has no signed byte load. Widening the
+activation to `i16` so `l16si` folds the extension into the load took the head
+from **62.2 to 55.3 ms** — one instruction, 2.43M times per token.
+
+| the head's inner loop | C (GCC `-O3`) | Rust (LLVM) |
+|---|---|---|
+| accumulators | **1** — serial dependency chain | **4** independent |
+| stored-bias removal | `addi -8` **per element** | hoisted, one correction per row |
+| activation load | `l8ui` + `sext` | `l16si` |
+| instructions per MAC | ~8 | ~5 |
+| MAC16 (`mula.*`) | **none** | **none** |
+
+Two hypotheses died here, both cheaply. **MAC16 is not the answer** — the LX7
+has a multiply-accumulate unit and *neither* compiler emits it, so it cannot
+explain any gap between them. And **the head is not behind C on arithmetic**;
+that claim came from assuming C's 26.7 ms of memory traffic is additive with
+its compute, which would put C at 6.0 cycles/MAC on an eight-instruction
+serial loop. Nothing in-order does that. C's single accumulator stalls, and
+the stalls absorb its memory latency — the same mechanism that made our own
+int4 packing measure 0.0 ms back when our loop stalled too.
+
+**So the head's remaining cost is stalls, not instructions.** 41.9 ms of
+non-memory time for ~6.1M instructions is about **1.65 cycles per
+instruction** on a core that issues one per cycle. That is load-use latency:
+the loop asks for a byte and waits. The lever is software pipelining — issue
+row `r+1`'s loads while row `r` computes — not a wider instruction.
+
 ### Skipping head rows without reading them — measured, and it cannot work
 
 The firmware computes all 25,353 logits and uses exactly one number from them:
