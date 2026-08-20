@@ -64,10 +64,20 @@ fn tok_emb_rows_can_be_capped_independently_of_the_model() {
     };
     let model = Model::load(&bytes).expect("model.bin should parse");
     let full_rows = model.tok_emb().rows;
-    assert!(full_rows > 1, "sanity: test model should have more than one vocab row");
+    assert!(
+        full_rows > 1,
+        "sanity: test model should have more than one vocab row"
+    );
 
     let mut capped = model.tok_emb();
     capped.rows = 1;
-    assert_eq!(capped.rows, 1, "QT::rows should be freely mutable on an owned copy");
-    assert_eq!(model.tok_emb().rows, full_rows, "capping a copy must not affect the Model's own tok_emb");
+    assert_eq!(
+        capped.rows, 1,
+        "QT::rows should be freely mutable on an owned copy"
+    );
+    assert_eq!(
+        model.tok_emb().rows,
+        full_rows,
+        "capping a copy must not affect the Model's own tok_emb"
+    );
 }

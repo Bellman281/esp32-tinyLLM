@@ -17,8 +17,7 @@ impl Vocab {
     pub fn load(path: &str) -> Result<Vocab, String> {
         let text = fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
 
-        let n = parse_define(&text, "VOCAB_N")
-            .ok_or_else(|| "VOCAB_N not found".to_string())?;
+        let n = parse_define(&text, "VOCAB_N").ok_or_else(|| "VOCAB_N not found".to_string())?;
         let blob = parse_array_u8(&text, "VOCAB_BLOB")
             .ok_or_else(|| "VOCAB_BLOB not found".to_string())?;
         let off = parse_array_usize(&text, "VOCAB_OFF")

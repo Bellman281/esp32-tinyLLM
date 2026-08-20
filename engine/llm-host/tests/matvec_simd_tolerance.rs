@@ -244,9 +244,7 @@ fn matvec_deqrow_dot_within_measured_tolerance() {
     let exact = mean_ce_exact(&model, &val, windows);
     let deqrow = mean_ce_deqrow_dot(&model, &val, windows);
     let drift = (deqrow - exact).abs();
-    eprintln!(
-        "deq_row+dot: exact CE = {exact:.12}, deqrow CE = {deqrow:.12}, drift = {drift:.12}"
-    );
+    eprintln!("deq_row+dot: exact CE = {exact:.12}, deqrow CE = {deqrow:.12}, drift = {drift:.12}");
     assert!(
         drift < 1e-5,
         "deq_row+whole-row-dot matvec diverged more than the measured float-reorder \
@@ -277,9 +275,7 @@ fn matvec_range_chunked_lanes4_within_measured_tolerance() {
     let exact = mean_ce_exact(&model, &val, windows);
     let chunked = mean_ce_chunked::<4>(&model, &val, windows);
     let drift = (chunked - exact).abs();
-    eprintln!(
-        "LANES=4: exact CE = {exact:.12}, chunked CE = {chunked:.12}, drift = {drift:.12}"
-    );
+    eprintln!("LANES=4: exact CE = {exact:.12}, chunked CE = {chunked:.12}, drift = {drift:.12}");
     assert!(
         drift < 1e-5,
         "LANES=4 chunked-reduction matvec diverged more than the measured \
@@ -305,9 +301,7 @@ fn matvec_range_chunked_lanes8_within_measured_tolerance() {
     let exact = mean_ce_exact(&model, &val, windows);
     let chunked = mean_ce_chunked::<8>(&model, &val, windows);
     let drift = (chunked - exact).abs();
-    eprintln!(
-        "LANES=8: exact CE = {exact:.12}, chunked CE = {chunked:.12}, drift = {drift:.12}"
-    );
+    eprintln!("LANES=8: exact CE = {exact:.12}, chunked CE = {chunked:.12}, drift = {drift:.12}");
     assert!(
         drift < 1e-5,
         "LANES=8 chunked-reduction matvec diverged more than the measured \

@@ -57,6 +57,19 @@ ppl_windows = 4
 ppl_ce_fp32 = 2.6671
 ppl_ce_int8 = 2.6684
 
+# FNV-1a 64 over every token id a `prompt_ids` + `n_generate` greedy run
+# emits, prompt included. `llm-firmware` prints this at the end of a run, so
+# the on-device token stream -- which uses an int4 head split across two
+# cores, dual-core matvecs, per-core attention heads and a two-candidate
+# argmax, none of which any host test can execute -- can be compared against
+# one number instead of 400 tokens of prose.
+#
+# Gated by llm-host/tests/token_stream_digest.rs, which recomputes it through
+# the ordinary single-core path. That path is bit-exact by design, so if the
+# test fails, the digest moving IS the finding: find out why the tokens
+# changed before editing this line.
+gen_digest  = "0x327578cb136fd6aa"
+
 # NOTE — no `golden` key here: no PyTorch golden-logit reference exists for
 # this model. Correctness for it is covered against the C reference instead,
 # and exactly: `ppl_parity.rs` (cross-entropy) and `cli_parity.rs`

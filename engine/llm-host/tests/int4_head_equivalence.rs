@@ -67,8 +67,11 @@ fn int4_head_matches_the_staged_int8_head_bit_for_bit() {
             let (codes, row_scale_b) = head.packed_row(r);
             let dot_b = dot_int4_int8(codes, &actq, act_sum);
 
-            assert_eq!(row_scale_a.to_bits(), row_scale_b.to_bits(),
-                       "case {ci} row {r}: row scale differs");
+            assert_eq!(
+                row_scale_a.to_bits(),
+                row_scale_b.to_bits(),
+                "case {ci} row {r}: row scale differs"
+            );
             assert_eq!(dot_a, dot_b, "case {ci} row {r}: int32 dot differs");
             assert_eq!(
                 row_value(dot_a, row_scale_a, act_scale).to_bits(),
@@ -89,7 +92,11 @@ fn int4_staging_halves_what_the_head_streams() {
 
     // Firmware caps rows to the trained vocab before staging; use the full
     // table here since the ratio is what matters.
-    assert_eq!(head.row_bytes, head.cols.div_ceil(2), "row_bytes is ceil(cols/2)");
+    assert_eq!(
+        head.row_bytes,
+        head.cols.div_ceil(2),
+        "row_bytes is ceil(cols/2)"
+    );
     let int8_bytes = head.rows * head.cols;
     let int4_bytes = head.rows * head.row_bytes;
     assert!(

@@ -41,8 +41,8 @@ fn golden_logits_match_pytorch() {
         .unwrap_or_else(|e| panic!("read {}: {e} (run from llm-host/)", bin.display()));
     let model = Model::load(&bytes).expect("model.bin should parse (bad magic?)");
 
-    let gold_text = fs::read_to_string(&gold)
-        .unwrap_or_else(|e| panic!("read {}: {e}", gold.display()));
+    let gold_text =
+        fs::read_to_string(&gold).unwrap_or_else(|e| panic!("read {}: {e}", gold.display()));
     let mut lines = gold_text.lines();
 
     let plen: usize = lines
@@ -57,7 +57,11 @@ fn golden_logits_match_pytorch() {
         .split_whitespace()
         .map(|s| s.parse().expect("prompt id should be an integer"))
         .collect();
-    assert_eq!(prompt.len(), plen, "golden.txt's declared prompt length doesn't match the id list");
+    assert_eq!(
+        prompt.len(),
+        plen,
+        "golden.txt's declared prompt length doesn't match the id list"
+    );
 
     let reference: Vec<f32> = lines
         .map(|l| l.trim().parse().expect("logit line should be a float"))
@@ -102,7 +106,10 @@ fn golden_logits_match_pytorch() {
         max_abs < TOLERANCE,
         "Rust port diverges from the PyTorch golden reference: max abs diff {max_abs} >= {TOLERANCE}"
     );
-    assert_eq!(c_top, r_top, "Rust and PyTorch disagree on the argmax token");
+    assert_eq!(
+        c_top, r_top,
+        "Rust and PyTorch disagree on the argmax token"
+    );
 }
 
 /// int8-activations counterpart. Not "does this match PyTorch fp32" (see
@@ -129,8 +136,8 @@ fn golden_logits_int8_activations_matches_c_int8_numerics() {
         .unwrap_or_else(|e| panic!("read {}: {e} (run from llm-host/)", bin.display()));
     let model = Model::load(&bytes).expect("model.bin should parse (bad magic?)");
 
-    let gold_text = fs::read_to_string(&gold)
-        .unwrap_or_else(|e| panic!("read {}: {e}", gold.display()));
+    let gold_text =
+        fs::read_to_string(&gold).unwrap_or_else(|e| panic!("read {}: {e}", gold.display()));
     let mut lines = gold_text.lines();
     let plen: usize = lines.next().unwrap().trim().parse().unwrap();
     let prompt: Vec<usize> = lines

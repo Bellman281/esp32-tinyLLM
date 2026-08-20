@@ -77,9 +77,60 @@ fn int_after(haystack: &str, file: &str, marker: &str, close: char) -> usize {
     let end = rest
         .find(close)
         .unwrap_or_else(|| panic!("{file}: {marker:?} is not terminated by {close:?}"));
-    rest[..end].trim().parse().unwrap_or_else(|e| {
-        panic!("{file}: {marker:?} is not followed by an integer: {e}")
-    })
+    rest[..end]
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| panic!("{file}: {marker:?} is not followed by an integer: {e}"))
+}
+
+/// The `0x...` literal immediately following `marker`, up to `close`.
+fn hex_after(haystack: &str, file: &str, marker: &str, close: char) -> u64 {
+    let start = haystack
+        .find(marker)
+        .unwrap_or_else(|| panic!("{file}: no {marker:?} found"));
+    let rest = &haystack[start + marker.len()..];
+    let end = rest
+        .find(close)
+        .unwrap_or_else(|| panic!("{file}: {marker:?} is not terminated by {close:?}"));
+    let lit = rest[..end].trim();
+    let body = lit
+        .strip_prefix("0x")
+        .unwrap_or_else(|| panic!("{file}: {marker:?} is not followed by a 0x literal: {lit:?}"));
+    u64::from_str_radix(&body.replace('_', ""), 16)
+        .unwrap_or_else(|e| panic!("{file}: {marker:?} is not valid hex ({lit:?}): {e}"))
+}
+
+/// The firmware's expected token digest must be the registry's.
+///
+/// Same reasoning as the settings test below, one step further along: that
+/// one stops the two firmwares from benchmarking different work, this one
+/// stops the board from checking its output against a number nothing else
+/// believes. A stale constant here would print `OK` forever while the
+/// firmware diverged, which is worse than having no check at all -- a check
+/// that cannot fail reads as evidence.
+///
+/// If this fails, decide which side is right before editing either. The
+/// registry value is the one `token_stream_digest.rs` recomputes from the
+/// model; the firmware value is the one the board compares against.
+#[test]
+fn the_firmware_expects_the_registry_token_digest() {
+    let entry = manifest::default_model();
+    let want = entry
+        .gen_digest
+        .expect("default model needs `gen_digest` in model/models.toml");
+    let src = read_at_root(RUST_FIRMWARE);
+    let got = hex_after(
+        &src,
+        RUST_FIRMWARE,
+        "const EXPECTED_TOKEN_DIGEST: u64 = ",
+        ';',
+    );
+    assert_eq!(
+        got, want,
+        "\n{RUST_FIRMWARE}'s EXPECTED_TOKEN_DIGEST (0x{got:016x}) disagrees with \
+         model/models.toml's gen_digest (0x{want:016x}).\n\
+         The board would report OK against a value nothing else computes.\n"
+    );
 }
 
 #[test]
@@ -99,7 +150,12 @@ fn both_firmwares_use_the_registry_benchmark_settings() {
     let c_n = int_after(&c_src, C_FIRMWARE, "N_GENERATE = ", ';');
 
     let rust_src = read_at_root(RUST_FIRMWARE);
-    let rust_ids = ints_after(&rust_src, RUST_FIRMWARE, "DEFAULT_PROMPT_IDS: [usize; 18] = [", ']');
+    let rust_ids = ints_after(
+        &rust_src,
+        RUST_FIRMWARE,
+        "DEFAULT_PROMPT_IDS: [usize; 18] = [",
+        ']',
+    );
     let rust_n = int_after(&rust_src, RUST_FIRMWARE, "const N_GENERATE: usize = ", ';');
 
     assert_eq!(

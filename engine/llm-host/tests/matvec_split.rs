@@ -95,7 +95,10 @@ fn splitting_the_head_by_rows_is_bit_exact() {
             t.matvec_rows_into(&x, hi, split);
         }
         assert!(
-            whole.iter().zip(&out).all(|(a, b)| a.to_bits() == b.to_bits()),
+            whole
+                .iter()
+                .zip(&out)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
             "head: split at {split} differs"
         );
     }

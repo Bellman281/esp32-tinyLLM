@@ -10,6 +10,7 @@
 #![no_std]
 
 pub mod attention;
+pub mod digest;
 pub mod model;
 pub mod ops;
 pub mod profile;
@@ -18,6 +19,7 @@ pub mod scratch;
 pub mod tensor;
 
 pub use attention::HeadsJob;
+pub use digest::TokenDigest;
 pub use model::{
     llm_forward, llm_forward_profiled, llm_forward_profiled_with_matvec_override,
     llm_forward_profiled_with_overrides, llm_forward_with_attn_override,
@@ -25,6 +27,4 @@ pub use model::{
 };
 pub use profile::Profile;
 pub use scratch::{sizes as scratch_sizes, Scratch, ScratchSizes};
-pub use tensor::{
-    activation_sum, dot_int4_int8, quantize_activations, Cfg, FVec, LoadError, QT,
-};
+pub use tensor::{activation_sum, dot_int4_int8, quantize_activations, Cfg, FVec, LoadError, QT};

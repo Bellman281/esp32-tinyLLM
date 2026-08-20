@@ -407,7 +407,10 @@ impl<'a> QT<'a> {
         // output head into PSRAM, so this is boot latency, not per-token
         // cost. Same values, same order.
         let pairs = self.cols / 2;
-        for (b, op) in row[..pairs].iter().zip(out[..2 * pairs].chunks_exact_mut(2)) {
+        for (b, op) in row[..pairs]
+            .iter()
+            .zip(out[..2 * pairs].chunks_exact_mut(2))
+        {
             op[0] = NIBBLE_I8[(b & 0xF) as usize];
             op[1] = NIBBLE_I8[(b >> 4) as usize];
         }

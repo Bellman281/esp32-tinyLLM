@@ -18,8 +18,8 @@ use crate::profile::Profile;
 use crate::rope;
 use crate::scratch::Scratch;
 use crate::tensor::{
-    Cfg, Cursor, FVec, LoadError, QT, FLAG_TIED_HEAD_CHECK, MAGIC_CHECK, MAGIC_V2_CHECK,
-    MAX_FORMAT_VERSION_CHECK,
+    Cfg, Cursor, FVec, LoadError, FLAG_TIED_HEAD_CHECK, MAGIC_CHECK, MAGIC_V2_CHECK,
+    MAX_FORMAT_VERSION_CHECK, QT,
 };
 
 /// Matches the C code's fixed per-layer array capacity (`Model.attn_norm[32]`
@@ -45,7 +45,9 @@ fn bind_layer<'a>(base: &'a [u8], offset: usize, d: usize, f: usize, p: usize) -
     let mut c = Cursor::at(base, offset);
     // Order matches llm_load's per-layer bind sequence exactly.
     let attn_norm = c.bind_f(d).expect("layer offset computed at load time");
-    let qkv = c.bind_q(3 * d, d).expect("layer offset computed at load time");
+    let qkv = c
+        .bind_q(3 * d, d)
+        .expect("layer offset computed at load time");
     let attn_proj = c.bind_q(d, d).expect("layer offset computed at load time");
     let ffn_norm = c.bind_f(d).expect("layer offset computed at load time");
     let gate = c.bind_q(f, d).expect("layer offset computed at load time");
@@ -202,7 +204,13 @@ impl<'a> Model<'a> {
     }
 
     pub fn layer(&self, l: usize) -> Layer<'a> {
-        bind_layer(self.base, self.layer_offsets[l], self.cfg.dim, self.cfg.ffn, self.cfg.ple_dim)
+        bind_layer(
+            self.base,
+            self.layer_offsets[l],
+            self.cfg.dim,
+            self.cfg.ffn,
+            self.cfg.ple_dim,
+        )
     }
 
     /// The tied input/output embedding table, `[vocab, dim]`. `QT` is
@@ -359,7 +367,16 @@ pub fn llm_forward_profiled(
     now: &mut dyn FnMut() -> u64,
     prof: &mut Profile,
 ) {
-    llm_forward_impl(model, token, pos, s, Some(head), None, None, Some((now, prof)));
+    llm_forward_impl(
+        model,
+        token,
+        pos,
+        s,
+        Some(head),
+        None,
+        None,
+        Some((now, prof)),
+    );
 }
 
 /// Same decode step as `llm_forward_profiled`, plus `matvec_override`:
@@ -480,7 +497,16 @@ pub fn llm_forward_with_matvec_override(
     head: &mut dyn FnMut(&[f32], &mut [f32]),
     matvec_override: &mut dyn FnMut(&QT, &[f32], &mut [f32]),
 ) {
-    llm_forward_impl(model, token, pos, s, Some(head), Some(matvec_override), None, None);
+    llm_forward_impl(
+        model,
+        token,
+        pos,
+        s,
+        Some(head),
+        Some(matvec_override),
+        None,
+        None,
+    );
 }
 
 // Four optional hooks plus the model/token/pos/scratch it always needs. The
@@ -519,7 +545,13 @@ fn llm_forward_impl(
     model.tok_emb.deq_row(token, s.x);
 
     // ---- per-layer input: (RMSNorm(proj(x)/sqrt(D)) + table[tok]*sqrt(P)) / sqrt(2)
-    dispatch_matvec(&mut matvec_override, &model.ple_model_proj, s.x, &mut s.tmp_p[..lp], s.iq);
+    dispatch_matvec(
+        &mut matvec_override,
+        &model.ple_model_proj,
+        s.x,
+        &mut s.tmp_p[..lp],
+        s.iq,
+    );
     let dscale = 1.0 / libm::sqrtf(d as f32);
     for v in s.tmp_p[..lp].iter_mut() {
         *v *= dscale;
@@ -567,7 +599,13 @@ fn llm_forward_impl(
             };
         }
         ops::rmsnorm(s.x, layer.attn_norm, d, s.h);
-        dispatch_matvec(&mut matvec_override, &layer.qkv, s.h, &mut s.qkv[..3 * d], s.iq);
+        dispatch_matvec(
+            &mut matvec_override,
+            &layer.qkv,
+            s.h,
+            &mut s.qkv[..3 * d],
+            s.iq,
+        );
         sub!(attn_qkv_us);
         {
             let (q, rest) = s.qkv[..3 * d].split_at_mut(d);
@@ -637,7 +675,13 @@ fn llm_forward_impl(
         }
 
         // ---- PLE gate: x += RMSNorm(ple_proj(gelu(ple_gate(x)) * ple_l))
-        dispatch_matvec(&mut matvec_override, &layer.ple_gate, s.x, &mut s.g2[..p], s.iq);
+        dispatch_matvec(
+            &mut matvec_override,
+            &layer.ple_gate,
+            s.x,
+            &mut s.g2[..p],
+            s.iq,
+        );
         for i in 0..p {
             s.g2[i] = ops::gelu(s.g2[i]) * s.ple[l * p + i];
         }

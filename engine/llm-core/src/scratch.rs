@@ -14,22 +14,22 @@
 use crate::tensor::Cfg;
 
 pub struct Scratch<'a> {
-    pub x: &'a mut [f32],       // [dim]
-    pub h: &'a mut [f32],       // [max(ffn, dim)]
-    pub qkv: &'a mut [f32],     // [3*dim]
-    pub att: &'a mut [f32],     // [dim]
-    pub g1: &'a mut [f32],      // [ffn]
-    pub g2: &'a mut [f32],      // [max(ple_dim, ffn)]
-    pub ple: &'a mut [f32],     // [n_layers*ple_dim]
-    pub tmp_p: &'a mut [f32],   // [n_layers*ple_dim]
-    pub trow: &'a mut [f32],    // [n_layers*ple_dim]
+    pub x: &'a mut [f32],        // [dim]
+    pub h: &'a mut [f32],        // [max(ffn, dim)]
+    pub qkv: &'a mut [f32],      // [3*dim]
+    pub att: &'a mut [f32],      // [dim]
+    pub g1: &'a mut [f32],       // [ffn]
+    pub g2: &'a mut [f32],       // [max(ple_dim, ffn)]
+    pub ple: &'a mut [f32],      // [n_layers*ple_dim]
+    pub tmp_p: &'a mut [f32],    // [n_layers*ple_dim]
+    pub trow: &'a mut [f32],     // [n_layers*ple_dim]
     pub rope_cos: &'a mut [f32], // [head_dim/2]
     pub rope_sin: &'a mut [f32], // [head_dim/2]
-    pub logits: &'a mut [f32],  // [vocab]
-    pub scores: &'a mut [f32],  // [seq_len]
-    pub kcache: &'a mut [f32],  // [n_layers*seq_len*dim]
-    pub vcache: &'a mut [f32],  // [n_layers*seq_len*dim]
-    pub iq: &'a mut [i8],       // [max(dim, ffn)] -- int8-activation quant scratch
+    pub logits: &'a mut [f32],   // [vocab]
+    pub scores: &'a mut [f32],   // [seq_len]
+    pub kcache: &'a mut [f32],   // [n_layers*seq_len*dim]
+    pub vcache: &'a mut [f32],   // [n_layers*seq_len*dim]
+    pub iq: &'a mut [i8],        // [max(dim, ffn)] -- int8-activation quant scratch
 }
 
 /// Required length of each `Scratch` buffer for a given config. Pure

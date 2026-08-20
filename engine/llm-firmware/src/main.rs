@@ -29,7 +29,7 @@ mod vocab;
 use esp_idf_svc::hal::sys::esp_timer_get_time;
 use llm_core::{
     llm_forward_profiled_with_overrides, llm_forward_with_head_override, HeadsJob, Model, Profile,
-    QT,
+    TokenDigest, QT,
 };
 use std::io::Write;
 use std::time::Duration;
@@ -65,8 +65,27 @@ const DEFAULT_PROMPT_IDS: [usize; 18] = [
 const STDIN_PROMPT: bool = false;
 
 const N_GENERATE: usize = 400; // bumped from 200 -- still safely under the model's 512-token
-                                // hard context ceiling (seq_len, from the model file's own
-                                // header) even with a short prompt on top.
+                               // hard context ceiling (seq_len, from the model file's own
+                               // header) even with a short prompt on top.
+
+/// FNV-1a 64 over every token id this run emits, prompt included.
+///
+/// This is the only thing that checks the claim every figure in
+/// `benchmarks/device.toml` is reported alongside: that the firmware's output
+/// is identical to the reference engine's. The board runs an int4 output head
+/// split across two cores, dual-core matvecs, per-core attention heads and a
+/// greedy pick assembled from two running maxima -- none of which any host
+/// test can execute. Before this, the only comparison was a person reading
+/// the story and deciding it looked the same.
+///
+/// The value comes from `model/models.toml`'s `gen_digest`, computed by
+/// `llm-host/tests/token_stream_digest.rs` through
+/// `llm_forward_with_head_override` with the head reproduced exactly as
+/// `head.rs` computes it. It is duplicated here because this crate cannot
+/// read a TOML file at compile time (no build script, no filesystem on the
+/// target), and `benchmark_settings_match.rs` asserts the two agree -- the
+/// same treatment `N_GENERATE` and `DEFAULT_PROMPT_IDS` already get.
+const EXPECTED_TOKEN_DIGEST: u64 = 0x327578cb136fd6aa;
 
 /// Reads one line of comma-separated token IDs from stdin (wired to the
 /// USB-CDC console by ESP-IDF's std-app console VFS driver -- the same
@@ -368,8 +387,10 @@ fn main() {
     let mut pos = 0usize;
     let mut tok = 0usize;
 
+    let mut digest = TokenDigest::new();
     for &t in prompt_ids.iter() {
         tok = t;
+        digest.push(tok);
         emit(&mut out, tok);
         llm_forward_with_head_override(&model, tok, pos, &mut scratch, &mut head_matvec);
         pos += 1;
@@ -421,6 +442,7 @@ fn main() {
         let a0 = unsafe { esp_timer_get_time() };
         tok = head.last_argmax();
         let a1 = unsafe { esp_timer_get_time() };
+        digest.push(tok);
         emit(&mut out, tok);
         let a2 = unsafe { esp_timer_get_time() };
         argmax_us += a1 - a0;
@@ -465,6 +487,27 @@ fn main() {
     // exactly, same format string and same divisor (calls*1000, converting
     // an accumulated-microseconds total into an average ms/token per
     // stage) -- see Profile::ms_per_token's doc comment.
+    // Parity, as one number. A mismatch here invalidates every timing above
+    // it: a firmware that is fast because it computes something else is not a
+    // result. Printed whether or not it matches, and loudly when it does not,
+    // because a silent pass is indistinguishable from a check that never ran.
+    if digest.value() == EXPECTED_TOKEN_DIGEST {
+        println!(
+            "token digest:   0x{:016x} ({} tokens) OK -- matches models.toml gen_digest",
+            digest.value(),
+            digest.count()
+        );
+    } else {
+        println!(
+            "token digest:   0x{:016x} ({} tokens) MISMATCH -- expected 0x{:016x}. \
+             The output is NOT identical to the reference engine; the timings below \
+             describe a different computation.",
+            digest.value(),
+            digest.count(),
+            EXPECTED_TOKEN_DIGEST
+        );
+    }
+
     if let Some([input, attn, ffn, ple, head]) = prof.ms_per_token() {
         println!(
             "profile ms/token: input {input:.1} | attn {attn:.1} | ffn {ffn:.1} | ple {ple:.1} | head {head:.1}"

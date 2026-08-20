@@ -50,6 +50,12 @@ pub struct Model {
     pub ppl_windows: Option<usize>,
     pub ppl_ce_fp32: Option<f64>,
     pub ppl_ce_int8: Option<f64>,
+    /// FNV-1a 64 over every token id emitted by a `prompt_ids` +
+    /// `n_generate` greedy run, as a `"0x..."` string. What the firmware
+    /// prints at the end of a run, so an on-device token stream can be
+    /// checked against one the parity suite covers. See
+    /// `llm-host/tests/token_stream_digest.rs`.
+    pub gen_digest: Option<u64>,
 }
 
 fn at_root(rel: &str) -> PathBuf {
@@ -207,6 +213,7 @@ fn parse(text: &str) -> Manifest {
             "ppl_windows" => m.ppl_windows = Some(parse_num(value, lineno)),
             "ppl_ce_fp32" => m.ppl_ce_fp32 = Some(parse_float(value, lineno)),
             "ppl_ce_int8" => m.ppl_ce_int8 = Some(parse_float(value, lineno)),
+            "gen_digest" => m.gen_digest = Some(parse_hex_u64(value, lineno)),
             other => panic!(
                 "{MANIFEST_PATH}:{}: unknown key {other:?} in [{sec}] -- add it to \
                  manifest.rs's match if it's intentional, rather than letting it \
@@ -253,6 +260,27 @@ fn parse_float(v: &str, lineno: usize) -> f64 {
     v.parse().unwrap_or_else(|e| {
         panic!(
             "{MANIFEST_PATH}:{}: expected a float, got {v:?}: {e}",
+            lineno + 1
+        )
+    })
+}
+
+/// A quoted `"0x..."` 64-bit value. Quoted and hex rather than a bare
+/// integer because the digest is a bit pattern, not a quantity: decimal
+/// would make an off-by-one look plausible, and this file's number grammar
+/// has no unsigned-64 form (`parse_num` returns `usize`, `parse_float`
+/// would silently lose precision above 2^53).
+fn parse_hex_u64(v: &str, lineno: usize) -> u64 {
+    let s = unquote(v, lineno);
+    let body = s.strip_prefix("0x").unwrap_or_else(|| {
+        panic!(
+            "{MANIFEST_PATH}:{}: expected a quoted \"0x...\" digest, got {s:?}",
+            lineno + 1
+        )
+    });
+    u64::from_str_radix(body, 16).unwrap_or_else(|e| {
+        panic!(
+            "{MANIFEST_PATH}:{}: expected 64-bit hex, got {s:?}: {e}",
             lineno + 1
         )
     })

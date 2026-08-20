@@ -41,11 +41,22 @@ fn head_override_receives_correct_shapes_and_its_output_becomes_logits() {
         }
     };
 
-    llm_forward_with_head_override(&model, /* token */ 0, /* pos */ 0, &mut s, &mut head);
+    llm_forward_with_head_override(
+        &model, /* token */ 0, /* pos */ 0, &mut s, &mut head,
+    );
 
-    assert_eq!(calls, 1, "override should run exactly once per llm_forward call");
-    assert_eq!(seen_x_len, model.cfg.dim, "head override's x should be the D-dim pre-head activation");
-    assert_eq!(seen_y_len, model.cfg.vocab, "head override's y should be the full vocab-size logit buffer");
+    assert_eq!(
+        calls, 1,
+        "override should run exactly once per llm_forward call"
+    );
+    assert_eq!(
+        seen_x_len, model.cfg.dim,
+        "head override's x should be the D-dim pre-head activation"
+    );
+    assert_eq!(
+        seen_y_len, model.cfg.vocab,
+        "head override's y should be the full vocab-size logit buffer"
+    );
 
     for i in 0..model.cfg.vocab {
         assert_eq!(

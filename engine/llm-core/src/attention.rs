@@ -218,7 +218,16 @@ pub fn forward(
     seq_len: usize,
 ) {
     debug_assert_eq!(n_heads * head_dim, dim);
-    store_kv(k, v, kcache_layer, vcache_layer, pos, n_heads, head_dim, seq_len);
+    store_kv(
+        k,
+        v,
+        kcache_layer,
+        vcache_layer,
+        pos,
+        n_heads,
+        head_dim,
+        seq_len,
+    );
     heads(
         q,
         kcache_layer,
