@@ -520,6 +520,35 @@ first, and benchmark. An FFI call per row has real overhead at these row
 lengths (66–128 elements), so this is **not** a guaranteed win — it needs a
 before/after on hardware, not an assumption that SIMD is faster.
 
+### Skipping head rows without reading them — measured, and it cannot work
+
+The firmware computes all 25,353 logits and uses exactly one number from them:
+`tok = head.last_argmax()`. Nothing reads `logits`. So in principle a row whose
+value *cannot* beat the running maximum need never be read at all — and since
+each row's scale lives in a separate 101 KB array, the test costs no PSRAM read
+of the row's 48 bytes. At 13.4 ms of exposed memory time, skipping most rows
+would be the largest remaining win in the stage.
+
+Two exact bounds were measured on the host, over real decode steps:
+
+| bound | rows skipped |
+|---|---|
+| max-abs: `\|dot\| <= 8 * sum\|a_j\|` | **0 of 25,353** |
+| Cauchy–Schwarz: `\|dot\| <= \|\|c-8\|\|₂ * \|\|a\|\|₂`, row norm precomputed | **0 of 25,353** |
+
+Not "few" — none, on every step tried. The reason is dimensional and does not
+depend on tuning. Both bounds are worst-case: they assume every element of the
+row aligns in sign with the activation. A real dot over `d = 96` elements with
+mixed signs lands around `sqrt(d)` below that, so any such bound is ~10x loose.
+The row scales span only **12.1x** (2.011e-2 to 2.432e-1), which is not enough
+spread for a 10x-loose bound to separate anything.
+
+Recorded so nobody re-derives it. Making this work would need a bound tight to
+within the scale spread, which for exact argmax over high-dimensional inner
+products is not available cheaply. An *approximate* pruner would work and would
+change the token stream, which is the same trade the fp16 KV cache offers at a
+better rate.
+
 ### The output head — the arithmetic fixes are done; the diagnosis was the whole story
 
 **Resolved. The head went 94.6 -> 61.5 ms, 1.66x -> 1.08x of C.** What follows
