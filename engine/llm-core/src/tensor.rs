@@ -561,6 +561,280 @@ pub fn activation_sum(actq: &[i8]) -> i32 {
     s
 }
 
+/// `quantize_activations`, storing the result as `i16` instead of `i8`.
+///
+/// Identical numbers -- the quantizer clamps to `-127..=127`, which is
+/// representable in both -- and identical arithmetic downstream. The width is
+/// the entire point, and the reason is an Xtensa detail visible only in the
+/// disassembly of the shipped firmware.
+///
+/// The LX7 has no signed byte load. `l8ui` zero-extends, so reading an `i8`
+/// costs a load *and* a `sext`, and the head's inner loop was doing both on
+/// every one of 2.43M elements per token:
+///
+/// ```text
+/// l8ui  a15, a3, 0
+/// sext  a15, a15, 7      <-- one instruction per element, pure overhead
+/// mull  a15, a15, a7
+/// ```
+///
+/// `l16si` is a signed 16-bit load. Holding the activation as `i16` folds the
+/// sign extension into the load and deletes that instruction. The cost is 96
+/// extra bytes of scratch, read once per token; the saving is one instruction
+/// per multiply-accumulate.
+///
+/// Bit-exact by construction, not by measurement: same clamp, same rounding
+/// (`round_ties_even`, matching C's `lrintf`), same scale, and `i16 as i32`
+/// equals `i8 as i32` for every value the quantizer can emit.
+pub fn quantize_activations_i16(x: &[f32], iq: &mut [i16]) -> f32 {
+    let n = iq.len();
+    debug_assert!(x.len() >= n);
+    let mut xmax = 1e-8f32;
+    for &v in &x[..n] {
+        let a = libm::fabsf(v);
+        if a > xmax {
+            xmax = a;
+        }
+    }
+    let inv = 127.0f32 / xmax;
+    for j in 0..n {
+        let q = round_ties_even(x[j] * inv) as i32;
+        iq[j] = q.clamp(-127, 127) as i16;
+    }
+    xmax / 127.0f32
+}
+
+/// `activation_sum` over `i16` activations. See `dot_int4_int16`.
+#[inline]
+pub fn activation_sum_i16(actq: &[i16]) -> i32 {
+    let mut s = 0i32;
+    for &a in actq {
+        s += a as i32;
+    }
+    s
+}
+
+/// `dot_int4_int8` with the activation held as `i16`.
+///
+/// Same identity, same four lanes, same bias hoist -- only the activation's
+/// storage width differs. See `quantize_activations_i16` for why: Xtensa's
+/// `l8ui` zero-extends, so an `i8` activation costs a load plus a `sext`,
+/// while `l16si` sign-extends in the load. One instruction per
+/// multiply-accumulate, across 2.43M of them per token.
+///
+/// Bit-exact against `dot_int4_int8` over the same activation values, and
+/// asserted so on every row of the shipped model by
+/// `llm-host/tests/int16_act_equivalence.rs`. `i16 as i32` and `i8 as i32`
+/// agree for everything `quantize_activations` can produce, and the
+/// accumulation order is unchanged.
+///
+/// Bounds are unchanged too: the products still fit an `i32` accumulator with
+/// room to spare (15 * 127 * 128 = 243,840 and 8 * 127 * 128 = 130,048).
+#[inline]
+pub fn dot_int4_int16(row_codes: &[u8], actq: &[i16], act_sum: i32) -> i32 {
+    let cols = actq.len();
+    let pairs = cols / 2;
+    let blocks = pairs / DOT_LANES;
+    let mut lanes = [0i32; DOT_LANES];
+    let bytes = &row_codes[..blocks * DOT_LANES];
+    let acts = &actq[..blocks * DOT_LANES * 2];
+    for (bq, aq) in bytes
+        .chunks_exact(DOT_LANES)
+        .zip(acts.chunks_exact(DOT_LANES * 2))
+    {
+        for l in 0..DOT_LANES {
+            let b = bq[l];
+            lanes[l] += (b & 0xF) as i32 * aq[2 * l] as i32;
+            lanes[l] += (b >> 4) as i32 * aq[2 * l + 1] as i32;
+        }
+    }
+    let mut half = DOT_LANES;
+    while half > 1 {
+        half /= 2;
+        for l in 0..half {
+            lanes[l] += lanes[l + half];
+        }
+    }
+    let mut acc = lanes[0];
+    let done = blocks * DOT_LANES;
+    for p in done..pairs {
+        let b = row_codes[p];
+        acc += (b & 0xF) as i32 * actq[2 * p] as i32;
+        acc += (b >> 4) as i32 * actq[2 * p + 1] as i32;
+    }
+    if cols % 2 == 1 {
+        acc += (row_codes[pairs] & 0xF) as i32 * actq[cols - 1] as i32;
+    }
+    acc - 8 * act_sum
+}
+
+/// Four rows at once, against one activation vector.
+///
+/// The same idea as `dot2_int4_int16` taken one step further: each activation
+/// is loaded once and multiplied into four rows instead of two, so activation
+/// loads fall from 0.5 per multiply-accumulate to 0.25. The head's loop is
+/// issue-bound (8.13 cycles/MAC cache-resident against 9.01 streaming), so
+/// instructions are the currency.
+///
+/// ```text
+/// per 8 MACs      one row     two rows    four rows
+///   weight loads      4           4           4
+///   nibble extracts   8           8           8
+///   activation loads  8           4           2
+///   mull + add       16          16          16
+/// ```
+///
+/// IT DID NOT PAY. **This function is not on the firmware's hot path, and
+/// should not be put back on it without re-measuring.** The risk written here
+/// before the measurement was that four rows need four lane sets, and at
+/// `DOT_LANES = 4` that is sixteen live accumulators on a machine with sixteen
+/// visible address registers — so the allocator would spill and the loads it
+/// added would cost more than the loads this removes. That is what happened.
+/// Wiring `head.rs` to this function moved the head **49.3 -> 52.8 ms** and the
+/// token 93.7 -> 97.1, and the probe's cycles/MAC went the wrong way,
+/// **8.13 -> 8.41**. Reverted at 9e0957c's two-row loop.
+///
+/// It is kept, tested and exported because the arithmetic is right and the
+/// register budget is the only thing wrong with it: `DOT_LANES = 2` with four
+/// rows is eight accumulators for the same 0.25 loads/MAC, and that variant is
+/// worth a measurement someday. Deleting the function would delete the
+/// evidence of where the wall is.
+///
+/// BIT-EXACT, for the same reason `dot2_int4_int16` is: the four rows share
+/// loads and nothing else. Same terms, same order, same lanes, same hoisted
+/// bias. `llm-host/tests/dot2_equivalence.rs` covers both.
+#[inline]
+pub fn dot4_int4_int16(rows: [&[u8]; 4], actq: &[i16], act_sum: i32) -> [i32; 4] {
+    let cols = actq.len();
+    let pairs = cols / 2;
+    let blocks = pairs / DOT_LANES;
+    let mut lanes = [[0i32; DOT_LANES]; 4];
+    let acts = &actq[..blocks * DOT_LANES * 2];
+    for (bi, aq) in acts.chunks_exact(DOT_LANES * 2).enumerate() {
+        let base = bi * DOT_LANES;
+        for l in 0..DOT_LANES {
+            let a0 = aq[2 * l] as i32;
+            let a1 = aq[2 * l + 1] as i32;
+            for (k, lane) in lanes.iter_mut().enumerate() {
+                let w = rows[k][base + l];
+                lane[l] += (w & 0xF) as i32 * a0;
+                lane[l] += (w >> 4) as i32 * a1;
+            }
+        }
+    }
+    let mut out = [0i32; 4];
+    for (k, lane) in lanes.iter_mut().enumerate() {
+        let mut half = DOT_LANES;
+        while half > 1 {
+            half /= 2;
+            for l in 0..half {
+                lane[l] += lane[l + half];
+            }
+        }
+        let mut acc = lane[0];
+        let done = blocks * DOT_LANES;
+        for p in done..pairs {
+            let w = rows[k][p];
+            acc += (w & 0xF) as i32 * actq[2 * p] as i32;
+            acc += (w >> 4) as i32 * actq[2 * p + 1] as i32;
+        }
+        if cols % 2 == 1 {
+            acc += (rows[k][pairs] & 0xF) as i32 * actq[cols - 1] as i32;
+        }
+        out[k] = acc - 8 * act_sum;
+    }
+    out
+}
+
+/// Two rows at once, against one activation vector.
+///
+/// WHY. The head's inner loop was measured **issue-bound** on the ESP32-S3:
+/// 8.96 cycles per multiply-accumulate with the weights resident in the data
+/// cache, against 9.64 streaming from PSRAM — only 8% apart, so the four
+/// accumulator chains already cover load-use latency and the only lever left
+/// is fewer instructions per MAC.
+///
+/// MEASURED AFTER: 8.13 cycles/MAC cache-resident against 9.01 streaming, and
+/// the head 55.3 -> 49.7 ms/token. Close to the ~11% the instruction count
+/// predicted. Going further -- four rows, `dot4_int4_int16` -- spilled the
+/// register file and gave the head back 3.5 ms; see that function's doc.
+///
+/// One instruction is free for the taking. The activation vector is the *same*
+/// for all 25,353 rows, and `dot_int4_int16` reloads it for every one of them
+/// — 2.43M `l16si` per token to read 96 distinct values. Doing two rows in one
+/// pass loads each activation once and uses it twice:
+///
+/// ```text
+/// per 4 MACs, one row at a time      per 4 MACs, two rows at once
+///   2x l8ui   (weight bytes)           2x l8ui   (one per row)
+///   4x extract (nibbles)               4x extract
+///   4x l16si  (activations)            2x l16si   <-- halved
+///   4x mull                            4x mull
+///   4x add                             4x add
+/// ```
+///
+/// Roughly 18 instructions down to 16 per four MACs, on a loop that runs 2.43M
+/// times per token.
+///
+/// BIT-EXACT. Each row's accumulation is untouched — same terms, same order,
+/// same four-lane split, same hoisted bias. The two rows never interact; they
+/// merely share a load. `llm-host/tests/dot2_equivalence.rs` asserts both
+/// returned values against `dot_int4_int16` on every row pair of the shipped
+/// model.
+///
+/// Returns `(dot for row_a, dot for row_b)`. Both rows must have the same
+/// length, which for a `QT` they always do.
+#[inline]
+pub fn dot2_int4_int16(row_a: &[u8], row_b: &[u8], actq: &[i16], act_sum: i32) -> (i32, i32) {
+    let cols = actq.len();
+    let pairs = cols / 2;
+    let blocks = pairs / DOT_LANES;
+    let mut lanes_a = [0i32; DOT_LANES];
+    let mut lanes_b = [0i32; DOT_LANES];
+    let bytes_a = &row_a[..blocks * DOT_LANES];
+    let bytes_b = &row_b[..blocks * DOT_LANES];
+    let acts = &actq[..blocks * DOT_LANES * 2];
+    for ((ba, bb), aq) in bytes_a
+        .chunks_exact(DOT_LANES)
+        .zip(bytes_b.chunks_exact(DOT_LANES))
+        .zip(acts.chunks_exact(DOT_LANES * 2))
+    {
+        for l in 0..DOT_LANES {
+            // Each activation is read into a register once and multiplied
+            // twice. That is the entire point of this function.
+            let a0 = aq[2 * l] as i32;
+            let a1 = aq[2 * l + 1] as i32;
+            let wa = ba[l];
+            let wb = bb[l];
+            lanes_a[l] += (wa & 0xF) as i32 * a0;
+            lanes_a[l] += (wa >> 4) as i32 * a1;
+            lanes_b[l] += (wb & 0xF) as i32 * a0;
+            lanes_b[l] += (wb >> 4) as i32 * a1;
+        }
+    }
+    let mut half = DOT_LANES;
+    while half > 1 {
+        half /= 2;
+        for l in 0..half {
+            lanes_a[l] += lanes_a[l + half];
+            lanes_b[l] += lanes_b[l + half];
+        }
+    }
+    let (mut acc_a, mut acc_b) = (lanes_a[0], lanes_b[0]);
+    let done = blocks * DOT_LANES;
+    for p in done..pairs {
+        let (a0, a1) = (actq[2 * p] as i32, actq[2 * p + 1] as i32);
+        acc_a += (row_a[p] & 0xF) as i32 * a0 + (row_a[p] >> 4) as i32 * a1;
+        acc_b += (row_b[p] & 0xF) as i32 * a0 + (row_b[p] >> 4) as i32 * a1;
+    }
+    if cols % 2 == 1 {
+        let a = actq[cols - 1] as i32;
+        acc_a += (row_a[pairs] & 0xF) as i32 * a;
+        acc_b += (row_b[pairs] & 0xF) as i32 * a;
+    }
+    (acc_a - 8 * act_sum, acc_b - 8 * act_sum)
+}
+
 /// int8-activation dot against a row of **already-unpacked int8 weights**.
 ///
 /// The counterpart to `dot_int4_int8`, and the arm of an experiment rather
@@ -572,9 +846,19 @@ pub fn activation_sum(actq: &[i8]) -> i32 {
 ///
 /// Which makes the packing a cost with no benefit. Every element pays a mask
 /// or a shift to get its nibble out, in a loop that runs 2.43M times per
-/// token, and the C reference -- which stages int8 -- never pays it. That is a
-/// candidate explanation for the head being the one stage still above C
-/// (1.09x) while every other stage is at 0.89-0.90x.
+/// token, and the C reference -- which stages int8 -- never pays it. That was
+/// a candidate explanation for the head being, at the time this was written,
+/// the one stage still above C (1.09x) while every other stage sat at
+/// 0.89-0.90x.
+///
+/// IT WAS THE WRONG CANDIDATE, twice over. Staging int8 to avoid the unpack
+/// was measured and made the head 62.3 -> 76.9 ms (see
+/// `llm-host/tests/int8_head_equivalence.rs`); the extra 1.2 MB streamed cost
+/// more than the mask saved. What actually closed the gap was two changes
+/// that left the packing alone: holding the activation as `i16` so the LX7's
+/// `l16si` folds a `sext` into the load, and doing two rows per pass so each
+/// activation is loaded once for two multiply-accumulates. The head is now
+/// 49.7 ms against C's 57.1 -- 0.87x, below C rather than above it.
 ///
 /// Bit-exact against `dot_int4_int8` over the same row: unpacking is exact
 /// (`nibble - 8` for a 4-bit code is always representable in `i8`), the

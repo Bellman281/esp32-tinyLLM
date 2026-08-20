@@ -46,7 +46,7 @@ use core::sync::atomic::{AtomicI32, AtomicPtr, AtomicU32, AtomicUsize, Ordering}
 use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::hal::sys::{esp_timer_get_time, TaskHandle_t, TickType_t};
 use esp_idf_svc::hal::task;
-use llm_core::{activation_sum, dot_int4_int8, quantize_activations, QT};
+use llm_core::{activation_sum_i16, dot2_int4_int16, quantize_activations_i16, QT};
 
 use crate::psram;
 
@@ -147,7 +147,13 @@ pub struct Head {
     // again until the next `matvec` call -- which by construction can't
     // start until the previous cycle's `wait_notification` returns, i.e.
     // after the worker is done reading it. See the module doc comment.
-    actq: UnsafeCell<[i8; MAX_HEAD_COLS]>,
+    // i16, not i8, and the width is the whole point. Xtensa has no signed
+    // byte load: `l8ui` zero-extends, so reading an `i8` activation costs a
+    // load AND a `sext` -- visible in the shipped firmware's disassembly, on
+    // every one of 2.43M elements per token. `l16si` sign-extends in the
+    // load. Costs 128 extra bytes of scratch, written once per token. See
+    // `llm_core::quantize_activations_i16`.
+    actq: UnsafeCell<[i16; MAX_HEAD_COLS]>,
     acts: AtomicU32, // f32 bits (no AtomicF32 in core)
     // Sum of `actq`, written with it and read by both cores for every row --
     // see llm_core::dot_int4_int8 for why one number per token replaces one
@@ -295,18 +301,65 @@ impl Head {
         // (either core), the write that populated it has already
         // happened-before, and nothing writes it again until both readers are
         // done.
-        let actq_all: &[i8; MAX_HEAD_COLS] = unsafe { &*self.actq.get() };
-        let actq: &[i8] = &actq_all[..cols];
+        let actq_all: &[i16; MAX_HEAD_COLS] = unsafe { &*self.actq.get() };
+        let actq: &[i16] = &actq_all[..cols];
         let acts = f32::from_bits(self.acts.load(Ordering::Acquire));
         let act_sum = self.act_sum.load(Ordering::Acquire);
-        for r in r0..r1 {
+        // TWO ROWS PER PASS. The activation vector is identical for all
+        // 25,353 rows, and doing one row at a time reloads it for every one --
+        // 2.43M `l16si` per token to read 96 distinct values. The head's loop
+        // measured issue-bound (8.96 cycles/MAC cache-resident against 9.64
+        // streaming, only 8% apart), so instruction count is the lever and
+        // this removes one load per two multiply-accumulates.
+        //
+        // TWO, NOT FOUR, and that is a measurement rather than a default.
+        // `llm_core::dot4_int4_int16` exists, is bit-exact, and takes the
+        // activation loads to 0.25/MAC -- and wiring it in here made the head
+        // SLOWER: 49.3 -> 52.8 ms, with the probe's cycles/MAC rising
+        // 8.13 -> 8.41. Four rows at DOT_LANES = 4 is sixteen live
+        // accumulators on a machine with sixteen visible address registers, so
+        // the allocator spilled and the reloads cost more than the loads it
+        // saved. Two rows is where this board's register budget runs out.
+        //
+        // Bit-exact: the two rows share a load and nothing else. Same terms,
+        // same order, same lanes, same hoisted bias -- asserted on every
+        // consecutive row pair of the shipped model by
+        // llm-host/tests/dot2_equivalence.rs.
+        let mut r = r0;
+        while r + 1 < r1 {
+            let (acc_a, acc_b) = dot2_int4_int16(
+                &w4[r * rb..r * rb + rb],
+                &w4[(r + 1) * rb..(r + 1) * rb + rb],
+                actq,
+                act_sum,
+            );
+            for (rr, acc) in [(r, acc_a), (r + 1, acc_b)] {
+                let val = acc as f32 * scale8[rr] * acts;
+                // SAFETY: caller's contract -- `y[r0..r1]` is this call's alone.
+                unsafe { core::ptr::write(y.add(rr), val) };
+                // Strictly `>`, so the LOWEST index wins a tie, and the pair is
+                // visited in increasing order -- same token a 0..n scan picks.
+                if val > best_val {
+                    best_val = val;
+                    best_idx = rr;
+                }
+            }
+            r += 2;
+        }
+        // An odd row count leaves one row over.
+        for r in r..r1 {
             // Two codes per byte, unpacked in the loop instead of at boot.
             // `llm_core::dot_int4_int8` is asserted bit-for-bit equal to the
             // staged-int8 dot over every row of the shipped model by
             // llm-host/tests/int4_head_equivalence.rs -- integer addition is
             // associative and every term is the same term, so this is exact,
             // not approximate.
-            let acc = dot_int4_int8(&w4[r * rb..r * rb + rb], actq, act_sum);
+            let (acc, _) = dot2_int4_int16(
+                &w4[r * rb..r * rb + rb],
+                &w4[r * rb..r * rb + rb],
+                actq,
+                act_sum,
+            );
             let val = acc as f32 * scale8[r] * acts;
             // SAFETY: caller's contract (see this fn's doc comment) is that
             // `y[r0..r1]` is this call's alone to write.
@@ -341,14 +394,14 @@ impl Head {
         // (never concurrently with itself -- `llm_forward` is called in a
         // sequential decode loop), and the worker never writes `actq`, so
         // this is the sole writer.
-        let actq: &mut [i8] = unsafe {
-            let arr: &mut [i8; MAX_HEAD_COLS] = &mut *self.actq.get();
+        let actq: &mut [i16] = unsafe {
+            let arr: &mut [i16; MAX_HEAD_COLS] = &mut *self.actq.get();
             &mut arr[..self.cols]
         };
-        let scale = quantize_activations(&x[..self.cols], actq);
+        let scale = quantize_activations_i16(&x[..self.cols], actq);
         // Relaxed: the Release on `acts` immediately below publishes both, the
         // same way it already publishes `actq`.
-        self.act_sum.store(activation_sum(actq), Ordering::Relaxed);
+        self.act_sum.store(activation_sum_i16(actq), Ordering::Relaxed);
         self.acts.store(scale.to_bits(), Ordering::Release);
 
         // Capture the raw pointer once; from here on both this core and
@@ -740,6 +793,57 @@ impl Head {
         (half * 2, mbs, own_us, worker_us)
     }
 
+    /// Is the head's inner loop limited by instructions or by waiting for
+    /// memory? Returns `(cache-resident cycles/MAC, streaming cycles/MAC)`.
+    ///
+    /// The head spends 41.9 ms/token on non-memory time for roughly 6.1M
+    /// instructions -- about 1.65 cycles per instruction on a core that issues
+    /// one. Either the loop is stalling on load-use latency, or the
+    /// instruction count is higher than counting mnemonics suggests. Those
+    /// call for opposite fixes: software pipelining versus a shorter loop.
+    ///
+    /// The distinguishing measurement is free of new machinery. Run the SAME
+    /// `rows_range` over a row range small enough to stay in the 64 KB data
+    /// cache and repeat it; every load hits. Compare against one pass over all
+    /// rows, where the weights stream from PSRAM and nothing is reused. If the
+    /// two rates match, the loop is issue-bound and the fix is fewer
+    /// instructions. If the cache-resident rate is markedly faster, it is
+    /// waiting for memory and the fix is to overlap the waiting.
+    ///
+    /// Single-core on purpose: the point is per-core issue rate, and running
+    /// both would fold bus contention back in -- the thing being controlled
+    /// for. Timing is data-independent (integer multiply-accumulate over a
+    /// fixed shape), so the zeroed activation scratch at boot is fine.
+    ///
+    /// # Safety
+    /// `y` must point to a valid `[f32; self.rows]` this call may write.
+    #[cfg(feature = "bandwidth-probe")]
+    pub unsafe fn probe_dot_cycles(&self, y: *mut f32) -> (f64, f64) {
+        const CPU_HZ: f64 = 240_000_000.0;
+        // 12 KB of weights against a 64 KB data cache: resident after the
+        // first pass, and small enough that the scale array rides along.
+        let warm_rows = 256.min(self.rows);
+        let reps = 64;
+
+        // Prime, so the first timed pass is not paying the misses.
+        let _ = unsafe { self.rows_range(y, 0, warm_rows) };
+        let t0 = unsafe { esp_timer_get_time() };
+        for _ in 0..reps {
+            let _ = unsafe { self.rows_range(y, 0, warm_rows) };
+        }
+        let t1 = unsafe { esp_timer_get_time() };
+        let warm_macs = (reps * warm_rows * self.cols) as f64;
+        let warm_cyc = (t1 - t0) as f64 * 1e-6 * CPU_HZ / warm_macs;
+
+        let t2 = unsafe { esp_timer_get_time() };
+        let _ = unsafe { self.rows_range(y, 0, self.rows) };
+        let t3 = unsafe { esp_timer_get_time() };
+        let cold_macs = (self.rows * self.cols) as f64;
+        let cold_cyc = (t3 - t2) as f64 * 1e-6 * CPU_HZ / cold_macs;
+
+        (warm_cyc, cold_cyc)
+    }
+
     /// The staged row count (== `vocab_n` passed to `stage_and_spawn`).
     /// Not read anywhere in this crate today (`main` gets `vocab_n`
     /// straight from `vocab::vocab_n()`, the same value, before `Head`
@@ -915,7 +1019,7 @@ pub fn stage_and_spawn(tok_emb: QT<'static>, vocab_n: usize) -> Result<&'static 
         rows,
         cols,
         row_bytes,
-        actq: UnsafeCell::new([0i8; MAX_HEAD_COLS]),
+        actq: UnsafeCell::new([0i16; MAX_HEAD_COLS]),
         acts: AtomicU32::new(0),
         act_sum: AtomicI32::new(0),
         job_y: core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),

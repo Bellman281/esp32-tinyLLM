@@ -50,16 +50,20 @@ either firmware drifts from them.
 | **+ MSPI bus 120 MHz** ‡ | 3.6 | 24.5 | 5.7 | 7.0 | 62.1 | 102.9 | **102.9** | 9.71 |
 | **+ int8 head (reverted)** ‡ | 4.0 | 26.8 | 6.2 | 7.6 | 76.9 | 121.5 | **121.6** | 8.23 |
 | **+ probe, always on** ‡ | 3.8 | 26.2 | 6.0 | 7.3 | 63.2 | 106.5 | **106.6** | 9.38 |
-| **Rust, now** | 3.9 | 26.3 | 6.2 | 7.6 | 62.2 | 106.2 | **106.3** | 9.41 |
+| **+ probe opt-in** | 3.9 | 26.3 | 6.2 | 7.6 | 62.2 | 106.2 | **106.3** | 9.41 |
 | **Rust, --fast-mspi** ‡ | 3.8 | 24.7 | 6.0 | 7.3 | 60.9 | 102.7 | **102.6** | 9.75 |
-| ratio vs C reference | 0.89x | 0.61x | 0.90x | 0.89x | 1.09x | 0.89x | **0.87x** | |
-| absolute gap | -0.5 | -16.6 | -0.7 | -0.9 | +5.1 | -13.6 | **-15.7** | |
-| **change this brought** | +0.0 | +0.0 | +0.0 | +0.0 | -0.1 | -0.1 | **+0.0** | |
+| **+ i16 activations** | 3.9 | 26.8 | 6.2 | 7.7 | 55.3 | 99.9 | **100.0** | 10.00 |
+| **Rust, now** | 4.0 | 27.1 | 6.5 | 7.9 | 49.7 | 95.2 | **95.2** | 10.50 |
+| **+ four rows per pass** ‡ | 3.9 | 27.0 | 6.1 | 7.4 | 52.8 | 97.2 | **97.1** | 10.30 |
+| ratio vs C reference | 0.91x | 0.63x | 0.94x | 0.93x | 0.87x | 0.79x | **0.78x** | |
+| absolute gap | -0.4 | -15.8 | -0.4 | -0.6 | -7.4 | -24.6 | **-26.8** | |
+| **change this brought** | +0.1 | +0.3 | +0.3 | +0.2 | -5.6 | -4.7 | **-4.8** | |
 
 ‡ **+ MSPI bus 120 MHz is not the shipping configuration** and is excluded from the ratios and the summary below. Requires CONFIG_IDF_EXPERIMENTAL_FEATURES; Espressif documents 120 MHz as temperature-sensitive and not recommended across the industrial range, and this board's boya flash part refused it and fell back. Real, reproducible, bit-exact -- and not what you get by cloning this repo. Available as a +3.3% opt-in; see BENCHMARKING.md.
 ‡ **+ int8 head (reverted) is not the shipping configuration** and is excluded from the ratios and the summary below. A negative result, kept because it corrects a claim this file made. Staging the head as unpacked int8 instead of packed int4 -- the C reference's format, and one fewer operation per element -- made the head 62.3 -> 76.9 ms and the token 106.3 -> 121.5. Reverted. Bit-exact throughout: the digest still printed OK, so this is purely a cost.
 ‡ **+ probe, always on is not the shipping configuration** and is excluded from the ratios and the summary below. Superseded by [run.rust-findings-off]. Kept because it is the measurement that justified making the probe opt-in: identical arithmetic, 0.3 ms slower, purely from ~50 lines sitting in head.rs.
 ‡ **Rust, --fast-mspi is not the shipping configuration** and is excluded from the ratios and the summary below. One flag from the default build -- scripts/run_device.sh --fast-mspi -- and not the default, for reasons about other boards rather than this one: CONFIG_IDF_EXPERIMENTAL_FEATURES, Espressif documenting 120 MHz as temperature-sensitive, and this board's boya flash part refusing it and falling back. Bit-exact: 102.6 ms/token, 9.75 tok/s, 18.9% faster than the C reference, digest 0x327578cb136fd6aa OK.
+‡ **+ four rows per pass is not the shipping configuration** and is excluded from the ratios and the summary below. A negative result, and a predicted one. Two rows per pass took the head's activation loads to 0.5 per multiply-accumulate; four would take them to 0.25, and on an issue-bound loop that should be the whole win. It is not: four rows need four lane sets, and at DOT_LANES = 4 that is sixteen live accumulators on a machine with sixteen visible address registers. The allocator spilled. Head 49.3 -> 52.8 ms and the token 93.7 -> 97.1, measured in the probe build against the probe build; cycles/MAC went the wrong way, 8.13 -> 8.41, which is the spill showing up directly. Reverted. Bit-exact throughout -- the digest still printed OK -- so this is purely a cost. The arithmetic is kept in llm_core::dot4_int4_int16, tested, off the hot path.
 
 **`attn` broken down** — the sub-stages the five-stage profile hides. `qkv`/`proj` are the fp32 matvec that also drives `ffn` and `ple`; `core` is attention proper, the only part that grows with sequence position. The C reference has no equivalent instrumentation, so it is absent rather than zero.
 
@@ -71,10 +75,13 @@ either firmware drifts from them.
 | **+ MSPI bus 120 MHz** | 7.2 | 0.15 | 14.7 | 2.5 | 24.6 | `qkv`, `proj`, `core` |
 | **+ int8 head (reverted)** | 7.9 | 0.15 | 16.0 | 2.7 | 26.8 | `qkv`, `proj`, `core` |
 | **+ probe, always on** | 7.6 | 0.15 | 15.9 | 2.6 | 26.2 | `qkv`, `proj`, `core` |
-| **Rust, now** | 7.8 | 0.15 | 15.6 | 2.7 | 26.2 | `qkv`, `proj`, `core` |
+| **+ probe opt-in** | 7.8 | 0.15 | 15.6 | 2.7 | 26.2 | `qkv`, `proj`, `core` |
 | **Rust, --fast-mspi** | 7.5 | 0.15 | 14.5 | 2.6 | 24.8 | `qkv`, `proj`, `core` |
+| **+ i16 activations** | 7.9 | 0.15 | 16.0 | 2.7 | 26.8 | `qkv`, `proj`, `core` |
+| **Rust, now** | 8.2 | 0.15 | 15.8 | 2.9 | 27.0 | `qkv`, `proj`, `core` |
+| **+ four rows per pass** | 7.7 | 0.15 | 16.5 | 2.7 | 27.1 | `qkv`, `proj`, `core` |
 
-**Rust is 14.8% faster per token than the C reference it was ported from** — 106.3 ms against 122.0, 9.41 tok/s against 8.20, on the same board with byte-identical output. It beats C on 4 of the 5 stages.
+**Rust is 28.2% faster per token than the C reference it was ported from** — 95.2 ms against 122.0, 10.50 tok/s against 8.20, on the same board with byte-identical output. It beats C on 5 of the 5 stages.
 
 <!-- END device-table -->
 
@@ -527,6 +534,42 @@ assuming it, unpack each row's packed nibbles into a contiguous buffer
 first, and benchmark. An FFI call per row has real overhead at these row
 lengths (66–128 elements), so this is **not** a guaranteed win — it needs a
 before/after on hardware, not an assumption that SIMD is faster.
+
+### Function-level parity: reading both compilers' output
+
+Value equivalence is verified exactly and stage cost is measured, but for most
+of this project's life there was nothing between those two layers — no
+comparison of *this loop* against *that loop*. `scripts/disasm_head.sh` and
+`scripts/disasm_c.sh` compile both sides for the same target and dump the hot
+functions, which is the only way to answer "are the operations the same".
+
+The first look paid for itself immediately: an `l8ui` + `sext` pair on every
+activation read, because Xtensa has no signed byte load. Widening the
+activation to `i16` so `l16si` folds the extension into the load took the head
+from **62.2 to 55.3 ms** — one instruction, 2.43M times per token.
+
+| the head's inner loop | C (GCC `-O3`) | Rust (LLVM) |
+|---|---|---|
+| accumulators | **1** — serial dependency chain | **4** independent |
+| stored-bias removal | `addi -8` **per element** | hoisted, one correction per row |
+| activation load | `l8ui` + `sext` | `l16si` |
+| instructions per MAC | ~8 | ~5 |
+| MAC16 (`mula.*`) | **none** | **none** |
+
+Two hypotheses died here, both cheaply. **MAC16 is not the answer** — the LX7
+has a multiply-accumulate unit and *neither* compiler emits it, so it cannot
+explain any gap between them. And **the head is not behind C on arithmetic**;
+that claim came from assuming C's 26.7 ms of memory traffic is additive with
+its compute, which would put C at 6.0 cycles/MAC on an eight-instruction
+serial loop. Nothing in-order does that. C's single accumulator stalls, and
+the stalls absorb its memory latency — the same mechanism that made our own
+int4 packing measure 0.0 ms back when our loop stalled too.
+
+**So the head's remaining cost is stalls, not instructions.** 41.9 ms of
+non-memory time for ~6.1M instructions is about **1.65 cycles per
+instruction** on a core that issues one per cycle. That is load-use latency:
+the loop asks for a byte and waits. The lever is software pipelining — issue
+row `r+1`'s loads while row `r` computes — not a wider instruction.
 
 ### Skipping head rows without reading them — measured, and it cannot work
 

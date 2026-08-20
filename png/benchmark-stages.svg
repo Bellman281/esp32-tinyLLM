@@ -37,34 +37,34 @@
 <text x="95.0" y="109" font-size="11.5" fill="#52514e">4.4</text>
 <path d="M74,116 H103.708 A4,4 0 0 1 107.708,120 V130 A4,4 0 0 1 103.708,134 H74 Z" fill="#eb6834"/>
 <text x="114.7" y="129" font-size="11.5" fill="#52514e">10.6</text>
-<path d="M74,136 H82.402 A4,4 0 0 1 86.402,140 V150 A4,4 0 0 1 82.402,154 H74 Z" fill="#1baf7a"/>
-<text x="93.4" y="149" font-size="11.5" fill="#52514e">3.9</text>
+<path d="M74,136 H82.72 A4,4 0 0 1 86.72,140 V150 A4,4 0 0 1 82.72,154 H74 Z" fill="#1baf7a"/>
+<text x="93.7" y="149" font-size="11.5" fill="#52514e">4.0</text>
 <text x="62" y="213.0" font-size="12.5" font-weight="500" fill="#0b0b0b" text-anchor="end">attn</text>
 <path d="M74,180 H206.422 A4,4 0 0 1 210.422,184 V194 A4,4 0 0 1 206.422,198 H74 Z" fill="#2a78d6"/>
 <text x="217.4" y="193" font-size="11.5" fill="#52514e">42.9</text>
 <path d="M74,200 H282.106 A4,4 0 0 1 286.106,204 V214 A4,4 0 0 1 282.106,218 H74 Z" fill="#eb6834"/>
 <text x="293.1" y="213" font-size="11.5" fill="#52514e">66.7</text>
-<path d="M74,220 H153.63400000000001 A4,4 0 0 1 157.63400000000001,224 V234 A4,4 0 0 1 153.63400000000001,238 H74 Z" fill="#1baf7a"/>
-<text x="164.6" y="233" font-size="11.5" fill="#52514e">26.3</text>
+<path d="M74,220 H156.178 A4,4 0 0 1 160.178,224 V234 A4,4 0 0 1 156.178,238 H74 Z" fill="#1baf7a"/>
+<text x="167.2" y="233" font-size="11.5" fill="#52514e">27.1</text>
 <text x="62" y="297.0" font-size="12.5" font-weight="500" fill="#0b0b0b" text-anchor="end">ffn</text>
 <path d="M74,264 H91.94200000000001 A4,4 0 0 1 95.94200000000001,268 V278 A4,4 0 0 1 91.94200000000001,282 H74 Z" fill="#2a78d6"/>
 <text x="102.9" y="277" font-size="11.5" fill="#52514e">6.9</text>
 <path d="M74,284 H120.244 A4,4 0 0 1 124.244,288 V298 A4,4 0 0 1 120.244,302 H74 Z" fill="#eb6834"/>
 <text x="131.2" y="297" font-size="11.5" fill="#52514e">15.8</text>
-<path d="M74,304 H89.71600000000001 A4,4 0 0 1 93.71600000000001,308 V318 A4,4 0 0 1 89.71600000000001,322 H74 Z" fill="#1baf7a"/>
-<text x="100.7" y="317" font-size="11.5" fill="#52514e">6.2</text>
+<path d="M74,304 H90.67 A4,4 0 0 1 94.67,308 V318 A4,4 0 0 1 90.67,322 H74 Z" fill="#1baf7a"/>
+<text x="101.7" y="317" font-size="11.5" fill="#52514e">6.5</text>
 <text x="62" y="381.0" font-size="12.5" font-weight="500" fill="#0b0b0b" text-anchor="end">ple</text>
 <path d="M74,348 H97.03 A4,4 0 0 1 101.03,352 V362 A4,4 0 0 1 97.03,366 H74 Z" fill="#2a78d6"/>
 <text x="108.0" y="361" font-size="11.5" fill="#52514e">8.5</text>
 <path d="M74,368 H134.872 A4,4 0 0 1 138.872,372 V382 A4,4 0 0 1 134.872,386 H74 Z" fill="#eb6834"/>
 <text x="145.9" y="381" font-size="11.5" fill="#52514e">20.4</text>
-<path d="M74,388 H94.16799999999999 A4,4 0 0 1 98.16799999999999,392 V402 A4,4 0 0 1 94.16799999999999,406 H74 Z" fill="#1baf7a"/>
-<text x="105.2" y="401" font-size="11.5" fill="#52514e">7.6</text>
+<path d="M74,388 H95.122 A4,4 0 0 1 99.122,392 V402 A4,4 0 0 1 95.122,406 H74 Z" fill="#1baf7a"/>
+<text x="106.1" y="401" font-size="11.5" fill="#52514e">7.9</text>
 <text x="62" y="465.0" font-size="12.5" font-weight="500" fill="#0b0b0b" text-anchor="end">head</text>
 <path d="M74,432 H251.578 A4,4 0 0 1 255.578,436 V446 A4,4 0 0 1 251.578,450 H74 Z" fill="#2a78d6"/>
 <text x="262.6" y="445" font-size="11.5" fill="#52514e">57.1</text>
 <path d="M74,452 H686.284 A4,4 0 0 1 690.284,456 V466 A4,4 0 0 1 686.284,470 H74 Z" fill="#eb6834"/>
 <text x="697.3" y="465" font-size="11.5" fill="#52514e">193.8</text>
-<path d="M74,472 H267.79600000000005 A4,4 0 0 1 271.79600000000005,476 V486 A4,4 0 0 1 267.79600000000005,490 H74 Z" fill="#1baf7a"/>
-<text x="278.8" y="485" font-size="11.5" fill="#52514e">62.2</text>
+<path d="M74,472 H228.046 A4,4 0 0 1 232.046,476 V486 A4,4 0 0 1 228.046,490 H74 Z" fill="#1baf7a"/>
+<text x="239.0" y="485" font-size="11.5" fill="#52514e">49.7</text>
 </svg>
