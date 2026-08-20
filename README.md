@@ -63,10 +63,12 @@ word.
 | **Rust, + KV layout** | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | **171.2** | 5.73 |
 | **+ int4 head** | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | **171.2** | 5.73 |
 | **+ 4 accumulators** | 6.6 | 47.0 | 10.1 | 12.7 | 81.3 | **157.7** | 6.21 |
-| **Rust, now** | 6.6 | 47.0 | 10.1 | 12.7 | 61.5 | **137.9** | 7.09 |
-| ratio vs C reference | 1.50x | 1.10x | 1.46x | 1.49x | 1.08x | **1.15x** | |
-| absolute gap | +2.2 | +4.1 | +3.2 | +4.2 | +4.4 | +18.1 | |
-| **change this brought** | +0.0 | +0.0 | +0.0 | +0.0 | -19.8 | **-19.8** | |
+| **+ bias hoist** | 6.6 | 47.0 | 10.1 | 12.7 | 61.5 | **137.9** | 7.09 |
+| **+ dual-core matvec** | 3.9 | 40.2 | 6.2 | 7.5 | 61.6 | **119.4** | 8.15 |
+| **Rust, now** | 3.8 | 39.8 | 6.0 | 7.3 | 61.5 | **118.4** | 8.25 |
+| ratio vs C reference | 0.86x | 0.93x | 0.87x | 0.86x | 1.08x | **0.99x** | |
+| absolute gap | -0.6 | -3.1 | -0.9 | -1.2 | +4.4 | -1.4 | |
+| **change this brought** | -0.1 | -0.4 | -0.2 | -0.2 | -0.1 | **-1.0** | |
 
 <!-- END device-table -->
 
@@ -75,9 +77,16 @@ Everything above — table and chart — is generated from
 so a re-measurement updates both at once and they cannot drift apart. Add a run,
 re-run the script; never hand-edit a figure here.
 
-The output head is now roughly **two-thirds of the remaining gap** and over half of
-runtime, while every other stage is within 1.5x of C. Closing it is the main open
-work. Methodology and per-lever detail: [BENCHMARKING.md](./BENCHMARKING.md).
+**The Rust engine is now faster than the C implementation it was ported from**, on
+the same board, with byte-identical output: 400 tokens in 48.46 s against C's
+48.78 s, 8.25 tok/s against 8.20. It beats C on four of the five stages; the
+output head is the one still behind, at 1.08x.
+
+Everything above is measured on hardware and generated from
+[`benchmarks/device.toml`](./benchmarks/device.toml) by `scripts/plot_stages.py`,
+so a re-measurement updates the table and the chart together and they cannot
+drift apart. Add a run, re-run the script; never hand-edit a figure here.
+Methodology and per-lever detail: [BENCHMARKING.md](./BENCHMARKING.md).
 
 ### Correctness
 

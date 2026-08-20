@@ -37,10 +37,12 @@ either firmware drifts from them.
 | **Rust, + KV layout** | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | **171.2** | 5.73 |
 | **+ int4 head** | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | **171.2** | 5.73 |
 | **+ 4 accumulators** | 6.6 | 47.0 | 10.1 | 12.7 | 81.3 | **157.7** | 6.21 |
-| **Rust, now** | 6.6 | 47.0 | 10.1 | 12.7 | 61.5 | **137.9** | 7.09 |
-| ratio vs C reference | 1.50x | 1.10x | 1.46x | 1.49x | 1.08x | **1.15x** | |
-| absolute gap | +2.2 | +4.1 | +3.2 | +4.2 | +4.4 | +18.1 | |
-| **change this brought** | +0.0 | +0.0 | +0.0 | +0.0 | -19.8 | **-19.8** | |
+| **+ bias hoist** | 6.6 | 47.0 | 10.1 | 12.7 | 61.5 | **137.9** | 7.09 |
+| **+ dual-core matvec** | 3.9 | 40.2 | 6.2 | 7.5 | 61.6 | **119.4** | 8.15 |
+| **Rust, now** | 3.8 | 39.8 | 6.0 | 7.3 | 61.5 | **118.4** | 8.25 |
+| ratio vs C reference | 0.86x | 0.93x | 0.87x | 0.86x | 1.08x | **0.99x** | |
+| absolute gap | -0.6 | -3.1 | -0.9 | -1.2 | +4.4 | -1.4 | |
+| **change this brought** | -0.1 | -0.4 | -0.2 | -0.2 | -0.1 | **-1.0** | |
 
 <!-- END device-table -->
 
@@ -76,6 +78,26 @@ implementations of the same math, including the dual-core int8-staged head,
 agreeing token for token on real silicon. Boot diagnostics agree too
 (`head staged int8: 2.54 MB`; PSRAM free 3141 KB for C, 3211 KB for Rust —
 different allocators, same model).
+
+## Where the time goes now
+
+Every stage except the head is faster than C, and the head is 1.08x. What is
+left is not in the profiled stages at all:
+
+```
+outside stages: argmax 2.74 | emit 0.03 | other 0.00 ms/token  (wall 121.1 vs forward 118.4)
+```
+
+The greedy argmax reads 25,353 logits back out of PSRAM — 101 KB at roughly
+half the bus rate, because a data-dependent branch per element leaves nothing to
+pipeline. It is 2.3% of a token and the single largest remaining line item.
+
+The fix is not to optimise that loop. Both cores already hold each logit in a
+register the moment `rows_range` computes it; each can track its own running
+argmax over its own row range, leaving a final choice between two candidates and
+no read-back at all. Tie-breaking stays exact — first-strictly-greater within a
+half, and `hi > lo ? hi : lo` between halves, which yields the lower index on a
+tie exactly as a `0..n` scan does.
 
 ## Instrumentation
 
@@ -351,6 +373,8 @@ both firmwares' constants against the registry.
 | + int4-staged head | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | 171.2 | 5.73 |
 | + 4 accumulators in the head dot | 6.6 | 47.0 | 10.1 | 12.7 | 81.3 | 157.7 | 6.21 |
 | + bias hoist, drop the LUT | 6.6 | 47.0 | 10.1 | 12.7 | 61.5 | 137.9 | 7.09 |
+| + dual-core matvec | 3.9 | 40.2 | 6.2 | 7.5 | 61.6 | 119.4 | 8.15 |
+| + argmax/stdout (outside the stages) | 3.8 | 39.8 | 6.0 | 7.3 | 61.5 | 118.4 | 8.25 |
 
 All at 400 tokens / 18-token prompt, so comparable to each other and to the
 C row above. Three changes, in order of what they were worth:

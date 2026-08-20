@@ -113,7 +113,7 @@ wall_ms = 161.0
 tok_s   = 6.21
 
 [run.rust-bias]
-label   = "Rust, now"
+label   = "+ bias hoist"
 engine  = "rust"
 date    = "2026-08-20"
 commit  = "perf(head): hoist the int4 bias out of the dot; drop the lookup table"
@@ -125,3 +125,31 @@ ple     = 12.7
 head    = 61.5
 wall_ms = 140.9
 tok_s   = 7.09
+
+[run.rust-dualcore]
+label   = "+ dual-core matvec"
+engine  = "rust"
+date    = "2026-08-20"
+commit  = "perf: run every matvec on both cores, not just the head"
+note    = "The head had been the only stage using both LX7 cores; input/attn/ffn/ple ran on one with the worker parked. Splitting each matvec by rows is bit-exact -- y[r] depends only on row r and x -- and llm_forward_with_matvec_override, shipped since Phase 3 with no user, was already the right hook. Sync cost measured at 0.5 ms/token across 43 matvecs, ~11.6 us per round trip, against ~18.6 ms saved. head moved +0.1 ms, so the control held."
+input   = 3.9
+attn    = 40.2
+ffn     = 6.2
+ple     = 7.5
+head    = 61.6
+wall_ms = 122.65
+tok_s   = 8.15
+
+[run.rust-final]
+label   = "Rust, now"
+engine  = "rust"
+date    = "2026-08-20"
+commit  = "perf(firmware): the last mile is outside the profiled stages"
+note    = "Argmax over a slice instead of a runtime-bounded index, and stdout locked once for the run instead of per token. Both outside the profiled stages, which is why neither had ever been looked at. Splitting that remainder showed emit 0.03 and other 0.00 -- it is all argmax, 2.74 ms, because s.logits lives in PSRAM and 25,353 floats read back with a data-dependent branch runs at about half the bus rate."
+input   = 3.8
+attn    = 39.8
+ffn     = 6.0
+ple     = 7.3
+head    = 61.5
+wall_ms = 121.1
+tok_s   = 8.25
