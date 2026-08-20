@@ -46,7 +46,7 @@ use core::sync::atomic::{AtomicI32, AtomicPtr, AtomicU32, AtomicUsize, Ordering}
 use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::hal::sys::{esp_timer_get_time, TaskHandle_t, TickType_t};
 use esp_idf_svc::hal::task;
-use llm_core::{activation_sum, dot_int4_int8, quantize_activations, QT};
+use llm_core::{activation_sum_i16, dot_int4_int16, quantize_activations_i16, QT};
 
 use crate::psram;
 
@@ -147,7 +147,13 @@ pub struct Head {
     // again until the next `matvec` call -- which by construction can't
     // start until the previous cycle's `wait_notification` returns, i.e.
     // after the worker is done reading it. See the module doc comment.
-    actq: UnsafeCell<[i8; MAX_HEAD_COLS]>,
+    // i16, not i8, and the width is the whole point. Xtensa has no signed
+    // byte load: `l8ui` zero-extends, so reading an `i8` activation costs a
+    // load AND a `sext` -- visible in the shipped firmware's disassembly, on
+    // every one of 2.43M elements per token. `l16si` sign-extends in the
+    // load. Costs 128 extra bytes of scratch, written once per token. See
+    // `llm_core::quantize_activations_i16`.
+    actq: UnsafeCell<[i16; MAX_HEAD_COLS]>,
     acts: AtomicU32, // f32 bits (no AtomicF32 in core)
     // Sum of `actq`, written with it and read by both cores for every row --
     // see llm_core::dot_int4_int8 for why one number per token replaces one
@@ -295,8 +301,8 @@ impl Head {
         // (either core), the write that populated it has already
         // happened-before, and nothing writes it again until both readers are
         // done.
-        let actq_all: &[i8; MAX_HEAD_COLS] = unsafe { &*self.actq.get() };
-        let actq: &[i8] = &actq_all[..cols];
+        let actq_all: &[i16; MAX_HEAD_COLS] = unsafe { &*self.actq.get() };
+        let actq: &[i16] = &actq_all[..cols];
         let acts = f32::from_bits(self.acts.load(Ordering::Acquire));
         let act_sum = self.act_sum.load(Ordering::Acquire);
         for r in r0..r1 {
@@ -306,7 +312,7 @@ impl Head {
             // llm-host/tests/int4_head_equivalence.rs -- integer addition is
             // associative and every term is the same term, so this is exact,
             // not approximate.
-            let acc = dot_int4_int8(&w4[r * rb..r * rb + rb], actq, act_sum);
+            let acc = dot_int4_int16(&w4[r * rb..r * rb + rb], actq, act_sum);
             let val = acc as f32 * scale8[r] * acts;
             // SAFETY: caller's contract (see this fn's doc comment) is that
             // `y[r0..r1]` is this call's alone to write.
@@ -341,14 +347,14 @@ impl Head {
         // (never concurrently with itself -- `llm_forward` is called in a
         // sequential decode loop), and the worker never writes `actq`, so
         // this is the sole writer.
-        let actq: &mut [i8] = unsafe {
-            let arr: &mut [i8; MAX_HEAD_COLS] = &mut *self.actq.get();
+        let actq: &mut [i16] = unsafe {
+            let arr: &mut [i16; MAX_HEAD_COLS] = &mut *self.actq.get();
             &mut arr[..self.cols]
         };
-        let scale = quantize_activations(&x[..self.cols], actq);
+        let scale = quantize_activations_i16(&x[..self.cols], actq);
         // Relaxed: the Release on `acts` immediately below publishes both, the
         // same way it already publishes `actq`.
-        self.act_sum.store(activation_sum(actq), Ordering::Relaxed);
+        self.act_sum.store(activation_sum_i16(actq), Ordering::Relaxed);
         self.acts.store(scale.to_bits(), Ordering::Release);
 
         // Capture the raw pointer once; from here on both this core and
@@ -915,7 +921,7 @@ pub fn stage_and_spawn(tok_emb: QT<'static>, vocab_n: usize) -> Result<&'static 
         rows,
         cols,
         row_bytes,
-        actq: UnsafeCell::new([0i8; MAX_HEAD_COLS]),
+        actq: UnsafeCell::new([0i16; MAX_HEAD_COLS]),
         acts: AtomicU32::new(0),
         act_sum: AtomicI32::new(0),
         job_y: core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),

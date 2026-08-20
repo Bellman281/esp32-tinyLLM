@@ -561,6 +561,113 @@ pub fn activation_sum(actq: &[i8]) -> i32 {
     s
 }
 
+/// `quantize_activations`, storing the result as `i16` instead of `i8`.
+///
+/// Identical numbers -- the quantizer clamps to `-127..=127`, which is
+/// representable in both -- and identical arithmetic downstream. The width is
+/// the entire point, and the reason is an Xtensa detail visible only in the
+/// disassembly of the shipped firmware.
+///
+/// The LX7 has no signed byte load. `l8ui` zero-extends, so reading an `i8`
+/// costs a load *and* a `sext`, and the head's inner loop was doing both on
+/// every one of 2.43M elements per token:
+///
+/// ```text
+/// l8ui  a15, a3, 0
+/// sext  a15, a15, 7      <-- one instruction per element, pure overhead
+/// mull  a15, a15, a7
+/// ```
+///
+/// `l16si` is a signed 16-bit load. Holding the activation as `i16` folds the
+/// sign extension into the load and deletes that instruction. The cost is 96
+/// extra bytes of scratch, read once per token; the saving is one instruction
+/// per multiply-accumulate.
+///
+/// Bit-exact by construction, not by measurement: same clamp, same rounding
+/// (`round_ties_even`, matching C's `lrintf`), same scale, and `i16 as i32`
+/// equals `i8 as i32` for every value the quantizer can emit.
+pub fn quantize_activations_i16(x: &[f32], iq: &mut [i16]) -> f32 {
+    let n = iq.len();
+    debug_assert!(x.len() >= n);
+    let mut xmax = 1e-8f32;
+    for &v in &x[..n] {
+        let a = libm::fabsf(v);
+        if a > xmax {
+            xmax = a;
+        }
+    }
+    let inv = 127.0f32 / xmax;
+    for j in 0..n {
+        let q = round_ties_even(x[j] * inv) as i32;
+        iq[j] = q.clamp(-127, 127) as i16;
+    }
+    xmax / 127.0f32
+}
+
+/// `activation_sum` over `i16` activations. See `dot_int4_int16`.
+#[inline]
+pub fn activation_sum_i16(actq: &[i16]) -> i32 {
+    let mut s = 0i32;
+    for &a in actq {
+        s += a as i32;
+    }
+    s
+}
+
+/// `dot_int4_int8` with the activation held as `i16`.
+///
+/// Same identity, same four lanes, same bias hoist -- only the activation's
+/// storage width differs. See `quantize_activations_i16` for why: Xtensa's
+/// `l8ui` zero-extends, so an `i8` activation costs a load plus a `sext`,
+/// while `l16si` sign-extends in the load. One instruction per
+/// multiply-accumulate, across 2.43M of them per token.
+///
+/// Bit-exact against `dot_int4_int8` over the same activation values, and
+/// asserted so on every row of the shipped model by
+/// `llm-host/tests/int16_act_equivalence.rs`. `i16 as i32` and `i8 as i32`
+/// agree for everything `quantize_activations` can produce, and the
+/// accumulation order is unchanged.
+///
+/// Bounds are unchanged too: the products still fit an `i32` accumulator with
+/// room to spare (15 * 127 * 128 = 243,840 and 8 * 127 * 128 = 130,048).
+#[inline]
+pub fn dot_int4_int16(row_codes: &[u8], actq: &[i16], act_sum: i32) -> i32 {
+    let cols = actq.len();
+    let pairs = cols / 2;
+    let blocks = pairs / DOT_LANES;
+    let mut lanes = [0i32; DOT_LANES];
+    let bytes = &row_codes[..blocks * DOT_LANES];
+    let acts = &actq[..blocks * DOT_LANES * 2];
+    for (bq, aq) in bytes
+        .chunks_exact(DOT_LANES)
+        .zip(acts.chunks_exact(DOT_LANES * 2))
+    {
+        for l in 0..DOT_LANES {
+            let b = bq[l];
+            lanes[l] += (b & 0xF) as i32 * aq[2 * l] as i32;
+            lanes[l] += (b >> 4) as i32 * aq[2 * l + 1] as i32;
+        }
+    }
+    let mut half = DOT_LANES;
+    while half > 1 {
+        half /= 2;
+        for l in 0..half {
+            lanes[l] += lanes[l + half];
+        }
+    }
+    let mut acc = lanes[0];
+    let done = blocks * DOT_LANES;
+    for p in done..pairs {
+        let b = row_codes[p];
+        acc += (b & 0xF) as i32 * actq[2 * p] as i32;
+        acc += (b >> 4) as i32 * actq[2 * p + 1] as i32;
+    }
+    if cols % 2 == 1 {
+        acc += (row_codes[pairs] & 0xF) as i32 * actq[cols - 1] as i32;
+    }
+    acc - 8 * act_sum
+}
+
 /// int8-activation dot against a row of **already-unpacked int8 weights**.
 ///
 /// The counterpart to `dot_int4_int8`, and the arm of an experiment rather
