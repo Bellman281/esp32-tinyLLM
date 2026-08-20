@@ -375,7 +375,7 @@ attn_proj = 2.6
 attn_dual = "qkv proj core"
 
 [run.rust-i16-act]
-label   = "Rust, now"
+label   = "+ i16 activations"
 engine  = "rust"
 date    = "2026-08-20"
 commit  = "perf(head): hold the activation as i16 -- Xtensa has no signed byte load (006f3a7)"
@@ -391,4 +391,23 @@ attn_qkv  = 7.9
 attn_rope = 0.15
 attn_core = 16.0
 attn_proj = 2.7
+attn_dual = "qkv proj core"
+
+[run.rust-dot2]
+label   = "Rust, now"
+engine  = "rust"
+date    = "2026-08-20"
+commit  = "perf(head): two rows per pass -- stop reloading the same activation (9e0957c)"
+note    = "head 55.3 -> 49.7 ms, token 100.0 -> 95.2, 28.2% faster than the C reference. The head is now 0.87x of C, having been 1.66x this morning. Found by measurement rather than guesswork: the stall probe reported 8.96 cycles/MAC cache-resident against 9.64 streaming -- 8% apart, so the loop is issue-bound and instruction count is the only lever. The activation vector is identical for all 25,353 rows and was being reloaded for every one; two rows per pass loads it once and multiplies it into both. Cycles/MAC 8.96 -> 8.13 in the probe build, close to the ~11% the instruction count predicted. Bit-exact; digest unchanged."
+input   = 4.0
+attn    = 27.1
+ffn     = 6.5
+ple     = 7.9
+head    = 49.7
+wall_ms = 95.2
+tok_s   = 10.50
+attn_qkv  = 8.2
+attn_rope = 0.15
+attn_core = 15.8
+attn_proj = 2.9
 attn_dual = "qkv proj core"
