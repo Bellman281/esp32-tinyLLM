@@ -5,7 +5,7 @@
 The ESP32-S3 has 512 KB of SRAM. This model has 28.9M parameters. It fits because
 ~25M of them live in a flash-mapped Per-Layer Embedding table (Gemma 3n's trick,
 three orders of magnitude down) and the rest are 4-bit quantized. It writes short
-stories at 9.4 tok/s — see the measured table below.
+stories at <!--fig:tok_s-->10.50<!--/fig--> tok/s — see the measured table below.
 
 This repo is a ground-up Rust port of the inference engine, ported function for
 function from [slvDev/esp32-ai](https://github.com/slvDev/esp32-ai)'s C
