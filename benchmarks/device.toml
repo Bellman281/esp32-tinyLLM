@@ -69,3 +69,17 @@ ple     = 12.7
 head    = 98.0
 wall_ms = 181.6
 tok_s   = 5.51
+
+[run.rust-kv]
+label   = "Rust, + KV layout"
+engine  = "rust"
+date    = "2026-08-19"
+commit  = "exp/kv-layout"
+note    = "attn -3.8 ms is the change: input/ffn/ple are unchanged to 0.0 ms, which is the signature of a patch that only touches attention.rs. head fell 3.2 ms with head.rs untouched -- the layout tax again, this time in our favour, handing back roughly what perf/nibble-lut cost it. Attribute -3.8 to the mechanism and -3.2 to placement luck that any future commit can take back."
+input   = 6.6
+attn    = 47.0
+ffn     = 10.1
+ple     = 12.7
+head    = 94.8
+wall_ms = 174.6
+tok_s   = 5.73

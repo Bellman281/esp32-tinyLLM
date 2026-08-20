@@ -24,11 +24,15 @@ TWO FILES, because GitHub renders README images against both themes. Embed as:
       <img alt="Per-stage inference cost, C vs Rust" src="./png/benchmark-stages.svg">
     </picture>
 
-COLOR: categorical slots 1–3 (blue/orange/aqua), stepped per mode, validated for
-colorblind separation as a set — worst all-pairs CVD dE 9.2 light / 9.4 dark,
-normal-vision 24.0 / 20.9. Aqua sits at 2.74:1 on the light surface, below the
-3:1 bar, so every bar carries a visible value label; identity is never left to
-color alone. Do not re-pick these by eye.
+COLOR: categorical slots 1–4 (blue/orange/aqua/yellow), stepped per mode,
+validated as a set on the adjacent pairlist that grouped bars use — worst
+adjacent CVD dE 9.1 light / 8.4 dark, normal-vision 22.9 / 19.8. Two light-mode
+slots sit under 3:1 on the surface (aqua 2.74, yellow 2.11), so every bar
+carries a visible value label and identity is never left to colour alone. Slot
+4 is the last safe one in this theme: a fifth series must fold into "Other" or
+facet, NOT take slot 5, because yellow-beside-orange already fails the
+all-pairs floors and more slots make it worse. Re-run the validator, do not
+re-pick by eye.
 """
 import argparse
 import os
@@ -42,11 +46,11 @@ STAGES = ["input", "attn", "ffn", "ple", "head"]
 THEME = {
     "light": {
         "surface": "#fcfcfb", "text": "#0b0b0b", "muted": "#52514e",
-        "grid": "#e4e3e0", "series": ["#2a78d6", "#eb6834", "#1baf7a"],
+        "grid": "#e4e3e0", "series": ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"],
     },
     "dark": {
         "surface": "#1a1a19", "text": "#ffffff", "muted": "#c3c2b7",
-        "grid": "#33322f", "series": ["#3987e5", "#d95926", "#199e70"],
+        "grid": "#33322f", "series": ["#3987e5", "#d95926", "#199e70", "#c98500"],
     },
 }
 
@@ -104,6 +108,12 @@ def bar(x, y, w, h, fill, r=4, hatch=None):
 
 def svg(doc, runs, mode):
     t = THEME[mode]
+    if len(runs) > len(t["series"]):
+        # Never cycle categorical hues, and never take a fifth slot from this
+        # theme: yellow already sits beside orange, and a fifth makes the
+        # colourblind floors unreachable. Select runs, or facet.
+        sys.exit(f"plot_stages: {len(runs)} runs but only {len(t['series'])} "
+                 f"validated colour slots -- pass --runs to choose, or facet")
     s = doc["settings"]
     n = len(runs)
     BH, GAP, PAD = 18, 2, 26          # bar height, 2px surface gap, group padding
@@ -137,7 +147,7 @@ def svg(doc, runs, mode):
 
     lx = L
     for i, (_, rb) in enumerate(runs):
-        o.append(f'<rect x="{lx}" y="66" width="10" height="10" rx="2" fill="{t["series"][i % 3]}"/>')
+        o.append(f'<rect x="{lx}" y="66" width="10" height="10" rx="2" fill="{t["series"][i]}"/>')
         o.append(f'<text x="{lx+15}" y="75" font-size="12" fill="{t["muted"]}">{esc(rb["label"])}</text>')
         lx += 15 + 7.2 * len(str(rb["label"])) + 26
 
@@ -159,7 +169,7 @@ def svg(doc, runs, mode):
             w = plot_w * v / top
             by = y + i * (BH + GAP)
             prov = st in str(rb.get("provisional_stages", "")).split()
-            o.append(bar(L, by, max(w, 1.5), BH, t["series"][i % 3],
+            o.append(bar(L, by, max(w, 1.5), BH, t["series"][i],
                          hatch="prov" if prov else None))
             o.append(f'<text x="{L+w+7:.1f}" y="{by+BH-5}" font-size="11.5" '
                      f'fill="{t["muted"]}">{v:.1f}</text>')
@@ -240,7 +250,7 @@ def inject(paths, body):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--runs", default="c,rust-before,rust-after")
+    ap.add_argument("--runs", default="", help="comma-separated run ids; default is every run in the file, in file order")
     ap.add_argument("--table", action="store_true", help="print the markdown table to stdout")
     ap.add_argument("--inject", nargs="*", metavar="FILE",
                     default=None, help="rewrite the marked table region in these files "

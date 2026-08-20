@@ -34,9 +34,10 @@ either firmware drifts from them.
 | **C reference** | 4.4 | 42.9 | 6.9 | 8.5 | 57.1 | **119.8** | 8.20 |
 | **Rust, before** | 7.8 | 54.4 | 11.9 | 15.2 | 94.6 | **183.9** | 5.34 |
 | **Rust, nibble LUT** | 6.6 | 50.8 | 10.1 | 12.7 | 98.0 | **178.2** | 5.51 |
-| ratio vs C reference | 1.50x | 1.18x | 1.46x | 1.49x | 1.72x | **1.49x** | |
-| absolute gap | +2.2 | +7.9 | +3.2 | +4.2 | +40.9 | +58.4 | |
-| **change this brought** | -1.2 | -3.6 | -1.8 | -2.5 | +3.4 | **-5.7** | |
+| **Rust, + KV layout** | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | **171.2** | 5.73 |
+| ratio vs C reference | 1.50x | 1.10x | 1.46x | 1.49x | 1.66x | **1.43x** | |
+| absolute gap | +2.2 | +4.1 | +3.2 | +4.2 | +37.7 | +51.4 | |
+| **change this brought** | +0.0 | -3.8 | +0.0 | +0.0 | -3.2 | **-7.0** | |
 
 <!-- END device-table -->
 
