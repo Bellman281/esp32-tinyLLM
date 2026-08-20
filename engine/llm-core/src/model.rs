@@ -323,7 +323,7 @@ fn dispatch_matvec(
 /// dual-core int8-staged output head (`Model.head_matvec` in the C code),
 /// see `llm_forward_with_head_override` below.
 pub fn llm_forward(model: &Model, token: usize, pos: usize, s: &mut Scratch) {
-    llm_forward_impl(model, token, pos, s, None, None, None, None);
+    llm_forward_impl(model, token, pos, s, None, None, None, None, false);
 }
 
 /// Same decode step as `llm_forward`, but the final output-head matvec is
@@ -345,7 +345,7 @@ pub fn llm_forward_with_head_override(
     s: &mut Scratch,
     head: &mut dyn FnMut(&[f32], &mut [f32]),
 ) {
-    llm_forward_impl(model, token, pos, s, Some(head), None, None, None);
+    llm_forward_impl(model, token, pos, s, Some(head), None, None, None, false);
 }
 
 /// Same decode step as `llm_forward_with_head_override`, plus `llm.h`'s
@@ -376,6 +376,7 @@ pub fn llm_forward_profiled(
         None,
         None,
         Some((now, prof)),
+        false,
     );
 }
 
@@ -421,7 +422,34 @@ pub fn llm_forward_profiled_with_matvec_override(
         Some(matvec_override),
         None,
         Some((now, prof)),
+        false,
     );
+}
+
+/// `llm_forward`, with every k/v rounded through `f16` before it is cached.
+///
+/// The measurement arm for an fp16 KV cache -- see
+/// `attention::store_kv_prec` for what it does and does not reproduce, and
+/// `llm-host/tests/fp16_kv_tolerance.rs` for the numbers it produced. Not a
+/// shipping path: nothing in `llm-firmware` calls it, and it makes the engine
+/// numerically different from the C reference, which is the entire thing being
+/// measured.
+pub fn llm_forward_fp16_kv(model: &Model, token: usize, pos: usize, s: &mut Scratch) {
+    llm_forward_impl(model, token, pos, s, None, None, None, None, true);
+}
+
+/// `llm_forward_fp16_kv` plus the output-head override, so the fp16-KV
+/// experiment can be run through the head `llm-firmware` actually uses
+/// rather than the default fp32 one. Measurement arm only; see
+/// `llm_forward_fp16_kv`.
+pub fn llm_forward_fp16_kv_with_head_override(
+    model: &Model,
+    token: usize,
+    pos: usize,
+    s: &mut Scratch,
+    head: &mut dyn FnMut(&[f32], &mut [f32]),
+) {
+    llm_forward_impl(model, token, pos, s, Some(head), None, None, None, true);
 }
 
 /// `llm_forward` with only the attention heads handed out -- no head or
@@ -439,7 +467,17 @@ pub fn llm_forward_with_attn_override(
     s: &mut Scratch,
     attn_heads: &mut dyn FnMut(attention::HeadsJob),
 ) {
-    llm_forward_impl(model, token, pos, s, None, None, Some(attn_heads), None);
+    llm_forward_impl(
+        model,
+        token,
+        pos,
+        s,
+        None,
+        None,
+        Some(attn_heads),
+        None,
+        false,
+    );
 }
 
 /// `llm_forward_profiled_with_matvec_override` plus `attn_heads`: the
@@ -482,6 +520,7 @@ pub fn llm_forward_profiled_with_overrides(
         Some(matvec_override),
         Some(attn_heads),
         Some((now, prof)),
+        false,
     );
 }
 
@@ -506,6 +545,7 @@ pub fn llm_forward_with_matvec_override(
         Some(matvec_override),
         None,
         None,
+        false,
     );
 }
 
@@ -522,6 +562,9 @@ fn llm_forward_impl(
     mut matvec_override: Option<&mut dyn FnMut(&QT, &[f32], &mut [f32])>,
     mut attn_override: Option<&mut dyn FnMut(attention::HeadsJob)>,
     mut prof: Option<(&mut dyn FnMut() -> u64, &mut Profile)>,
+    // Experiment arm only, always `false` on every shipping path. See
+    // `llm_forward_fp16_kv`.
+    kv_fp16: bool,
 ) {
     // `last_t` tracks the timestamp at the previous stage boundary --
     // matches `llm.h`'s reuse of a single rolling `profile_tN` local across
@@ -619,7 +662,7 @@ fn llm_forward_impl(
             let layer_kc = &mut s.kcache[l * seq * d..(l + 1) * seq * d];
             let layer_vc = &mut s.vcache[l * seq * d..(l + 1) * seq * d];
             debug_assert_eq!(h_heads * dh, d);
-            attention::store_kv(k, v, layer_kc, layer_vc, pos, h_heads, dh, seq);
+            attention::store_kv_prec(k, v, layer_kc, layer_vc, pos, h_heads, dh, seq, kv_fp16);
             // The heads are the part worth handing out: `store_kv` is
             // `n_heads` copies of `head_dim` floats, the heads are
             // `n_heads * (pos+1)` dot products over the same cache.
