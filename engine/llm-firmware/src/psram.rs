@@ -136,6 +136,22 @@ pub fn free_psram_bytes() -> usize {
 /// understate bandwidth. `black_box` on the result is what stops the loop being
 /// deleted.
 pub fn probe_read_bandwidth(buf: &[u8]) -> f64 {
+    let dt = stream_read_us(buf);
+    if dt <= 0 {
+        return f64::NAN;
+    }
+    (buf.len() / 4 * 4) as f64 / dt as f64
+}
+
+/// Stream `buf` once and return the elapsed microseconds.
+///
+/// The timing half of `probe_read_bandwidth`, split out so two cores can each
+/// time their own run and the caller can combine them. Bandwidth is a property
+/// of the bus, not of one core: with the reads happening on one core at a time
+/// there is no way to tell a bus that saturates at 68 MB/s from one that
+/// delivers 68 MB/s per core, and those imply opposite things about what to
+/// optimize next. See `Head::probe_weight_bandwidth_dual`.
+pub fn stream_read_us(buf: &[u8]) -> i64 {
     let words = buf.len() / 4;
     let p = buf.as_ptr() as *const u32;
     let t0 = unsafe { esp_timer_get_time() };
@@ -149,8 +165,5 @@ pub fn probe_read_bandwidth(buf: &[u8]) -> f64 {
     }
     let dt = unsafe { esp_timer_get_time() } - t0;
     core::hint::black_box(acc);
-    if dt <= 0 {
-        return f64::NAN;
-    }
-    (words * 4) as f64 / dt as f64
+    dt
 }

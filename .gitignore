@@ -37,3 +37,6 @@ training/generated/
 training/.venv/
 *.pyc
 *.egg-info/
+
+# Device run logs -- transient. Figures worth keeping go in benchmarks/device.toml.
+runs/

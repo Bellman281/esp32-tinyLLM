@@ -89,6 +89,33 @@ const JOB_HEAD: u32 = 0;
 const JOB_MATVEC: u32 = 1;
 const JOB_ATTN: u32 = 2;
 
+/// And a fourth, which computes nothing: stream a buffer and report how long it
+/// took, so the same measurement can be taken with one core reading and with
+/// two reading at once.
+///
+/// Splitting attention's heads across both cores took `core` from 28.3 to
+/// 15.6 ms/token. A perfect halving plus the measured 0.1 ms of sync predicts
+/// 14.25, so 1.35 ms -- 9.5% -- did not come back, and the single-core
+/// bandwidth probe cannot say why. Two candidates:
+///
+///   * Contention. Unlike the output head, both cores now scan the same KV
+///     cache at the same time. `probe_read_bandwidth` reports ~68 MB/s with
+///     one core reading, and that number is equally consistent with a bus
+///     that saturates at 68 and one that delivers 68 per core. Those imply
+///     opposite next moves.
+///   * Placement. The binary that introduced the split reads 68 MB/s where
+///     its predecessor read 72, on an identical probe over an identical
+///     buffer, before generation starts -- the layout tax, worth several
+///     percent on this board.
+///
+/// `JOB_PROBE` distinguishes them. If two cores reading disjoint halves
+/// finish in half the time one core takes over the whole buffer, the bus
+/// scales and the shortfall was placement. If they take as long as one core
+/// did, the bus is saturated, attention is memory-bound, and halving the KV
+/// cache's working set is worth building.
+#[cfg(feature = "bandwidth-probe")]
+const JOB_PROBE: u32 = 3;
+
 /// Ceiling on `seq_len` for the split attention path, because each core needs
 /// its own `scores` scratch and these are fixed-size `[f32; N]` in `.bss`
 /// rather than another PSRAM allocation -- 2 KB each, and `scores` is the
@@ -221,6 +248,20 @@ pub struct Head {
     prof_attn_wait_us: Cell<u64>,
     prof_attn_own_us: Cell<u64>,
     prof_attn_calls: Cell<u32>,
+
+    // ---- dual-core bandwidth probe ----------------------------------------
+    // The worker's half of a JOB_PROBE, and where it reports its elapsed time.
+    // Atomic rather than `Cell` unlike the profile counters above: those are
+    // read after generation ends with both tasks quiescent, this one is read
+    // by the inference core immediately after the worker's notify. u32
+    // microseconds, not u64 -- a half-buffer pass is ~9 ms, and AtomicU64 is
+    // not lock-free on a 32-bit LX7.
+    #[cfg(feature = "bandwidth-probe")]
+    pr_ptr: AtomicPtr<u8>,
+    #[cfg(feature = "bandwidth-probe")]
+    pr_len: AtomicUsize,
+    #[cfg(feature = "bandwidth-probe")]
+    pr_us: AtomicU32,
 }
 
 impl Head {
@@ -641,6 +682,64 @@ impl Head {
         (self.w4.len(), psram::probe_read_bandwidth(self.w4))
     }
 
+    /// Stream this head's staged weights with BOTH cores at once, over
+    /// disjoint halves, and report `(bytes, aggregate MB/s, this core's us,
+    /// the worker's us)`.
+    ///
+    /// Run next to `probe_weight_bandwidth`, which does the same work on one
+    /// core. The ratio between the two is the answer:
+    ///
+    /// * **~2.0x** -- the bus scales with cores. Attention was not contending,
+    ///   and the 1.35 ms the head split did not return is the layout tax. An
+    ///   fp16 KV cache would buy nothing, and this closes the question.
+    /// * **~1.0x** -- the bus is saturated by one core. Attention is
+    ///   memory-bound, its two cores are queueing behind each other, and
+    ///   halving the KV cache's working set is worth the tolerance it costs.
+    /// * **in between** -- partial contention; the fraction is roughly how
+    ///   much of the shortfall memory can account for.
+    ///
+    /// Disjoint halves rather than the same buffer twice, deliberately: two
+    /// cores reading the *same* addresses could be served by the data cache
+    /// and would understate contention. Disjoint is also what attention
+    /// actually does -- each core scans its own heads' regions of the cache.
+    ///
+    /// The overlap is not perfect: the worker starts one notify latency
+    /// (~12 us, measured) after this core does. Against a ~9 ms half-pass
+    /// that is 0.13%, and both per-core times are returned so an imbalance
+    /// large enough to matter is visible rather than folded into the average.
+    #[cfg(feature = "bandwidth-probe")]
+    pub fn probe_weight_bandwidth_dual(&self) -> (usize, f64, u32, u32) {
+        let n = self.w4.len();
+        let half = n / 2;
+        let (lo, hi) = self.w4.split_at(half);
+
+        self.pr_ptr
+            .store(lo.as_ptr() as *mut u8, Ordering::Relaxed);
+        self.pr_len.store(lo.len(), Ordering::Relaxed);
+        // Release: publishes pr_ptr/pr_len to the worker.
+        self.job_kind.store(JOB_PROBE, Ordering::Release);
+
+        // SAFETY: `self.worker` was set once in `stage_and_spawn`, before this
+        // `Head` was reachable.
+        let _ = unsafe { task::notify(self.worker.get(), NOTIFY) };
+
+        let own_us = psram::stream_read_us(hi).max(0) as u32;
+        let _ = task::wait_notification(TickType_t::MAX);
+        let worker_us = self.pr_us.load(Ordering::Relaxed);
+
+        // Aggregate throughput is total bytes over the WALL time both cores
+        // were busy, which is the slower of the two -- not the sum of the two
+        // rates, which would report perfect scaling even if one core sat idle
+        // while the other finished.
+        let wall = own_us.max(worker_us);
+        let mbs = if wall == 0 {
+            f64::NAN
+        } else {
+            (half * 2) as f64 / wall as f64
+        };
+        (half * 2, mbs, own_us, worker_us)
+    }
+
     /// The staged row count (== `vocab_n` passed to `stage_and_spawn`).
     /// Not read anywhere in this crate today (`main` gets `vocab_n`
     /// straight from `vocab::vocab_n()`, the same value, before `Head`
@@ -691,6 +790,17 @@ extern "C" fn head_worker_main(arg: *mut core::ffi::c_void) {
                     let out = core::slice::from_raw_parts_mut(op, on);
                     t.matvec_rows_into(x, out, rb);
                 }
+            }
+            #[cfg(feature = "bandwidth-probe")]
+            JOB_PROBE => {
+                let p = head.pr_ptr.load(Ordering::Relaxed);
+                let n = head.pr_len.load(Ordering::Relaxed);
+                // SAFETY: the dispatcher holds `self.w4` (a 'static PSRAM
+                // allocation) alive across the notify/wait and reads only the
+                // other half. Read-only on both sides, so even overlap would
+                // be sound; disjoint anyway, to match what attention does.
+                let dt = unsafe { psram::stream_read_us(core::slice::from_raw_parts(p, n)) };
+                head.pr_us.store(dt.max(0) as u32, Ordering::Relaxed);
             }
             JOB_ATTN => {
                 let dh = head.at_head_dim.load(Ordering::Relaxed);
@@ -846,6 +956,12 @@ pub fn stage_and_spawn(tok_emb: QT<'static>, vocab_n: usize) -> Result<&'static 
         prof_attn_wait_us: Cell::new(0),
         prof_attn_own_us: Cell::new(0),
         prof_attn_calls: Cell::new(0),
+        #[cfg(feature = "bandwidth-probe")]
+        pr_ptr: AtomicPtr::new(core::ptr::null_mut()),
+        #[cfg(feature = "bandwidth-probe")]
+        pr_len: AtomicUsize::new(0),
+        #[cfg(feature = "bandwidth-probe")]
+        pr_us: AtomicU32::new(0),
     }));
 
     // SAFETY: `head_worker_main` is a valid `extern "C" fn(*mut c_void)`;

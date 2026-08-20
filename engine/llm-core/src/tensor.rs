@@ -561,6 +561,60 @@ pub fn activation_sum(actq: &[i8]) -> i32 {
     s
 }
 
+/// int8-activation dot against a row of **already-unpacked int8 weights**.
+///
+/// The counterpart to `dot_int4_int8`, and the arm of an experiment rather
+/// than a second-best fallback. `llm-firmware` stages the output head as
+/// packed int4, which was chosen to halve what the stage streams -- 2.54 MB
+/// down to 1.32 MB per token. That change moved the head by **0.0 ms**, and
+/// the dual-core bandwidth probe later explained why: the head runs at 21% of
+/// available PSRAM bandwidth, so it is compute-bound and always was.
+///
+/// Which makes the packing a cost with no benefit. Every element pays a mask
+/// or a shift to get its nibble out, in a loop that runs 2.43M times per
+/// token, and the C reference -- which stages int8 -- never pays it. That is a
+/// candidate explanation for the head being the one stage still above C
+/// (1.09x) while every other stage is at 0.89-0.90x.
+///
+/// Bit-exact against `dot_int4_int8` over the same row: unpacking is exact
+/// (`nibble - 8` for a 4-bit code is always representable in `i8`), the
+/// accumulation order is identical, and the same four-lane split applies.
+/// Asserted on every row of the shipped model by
+/// `llm-host/tests/int8_head_equivalence.rs`.
+///
+/// No `act_sum` parameter, unlike `dot_int4_int8`: that argument exists to
+/// remove the stored `+8` bias once per row instead of once per element, and
+/// unpacked weights carry no bias to remove.
+#[inline]
+pub fn dot_int8_int8(row: &[i8], actq: &[i8]) -> i32 {
+    let n = actq.len();
+    debug_assert!(row.len() >= n);
+    let blocks = n / DOT_LANES;
+    let mut lanes = [0i32; DOT_LANES];
+    let ws = &row[..blocks * DOT_LANES];
+    let acts = &actq[..blocks * DOT_LANES];
+    // Four independent chains, same reason as `dot_int4_int8`: a single
+    // accumulator makes every add wait on the previous one, and breaking that
+    // dependency was worth 91.0 -> 81.3 ms on the int4 path.
+    for (wq, aq) in ws.chunks_exact(DOT_LANES).zip(acts.chunks_exact(DOT_LANES)) {
+        for l in 0..DOT_LANES {
+            lanes[l] += wq[l] as i32 * aq[l] as i32;
+        }
+    }
+    let mut half = DOT_LANES;
+    while half > 1 {
+        half /= 2;
+        for l in 0..half {
+            lanes[l] += lanes[l + half];
+        }
+    }
+    let mut acc = lanes[0];
+    for i in blocks * DOT_LANES..n {
+        acc += row[i] as i32 * actq[i] as i32;
+    }
+    acc
+}
+
 /// int8-activation dot against a row of **packed int4 codes**, without
 /// unpacking the row first. `act_sum` is `activation_sum(actq)`, the same value
 /// for every row of a given token. Returns the raw `i32` accumulation; the

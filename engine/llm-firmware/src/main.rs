@@ -349,6 +349,45 @@ fn main() {
             bytes as f64 / 1e6,
             bytes as f64 / bw / 1000.0
         );
+
+        #[cfg(feature = "bandwidth-probe")]
+        {
+        // The same probe with both cores reading disjoint halves at once.
+        //
+        // One core reading cannot distinguish a bus that saturates at `bw`
+        // from one that delivers `bw` per core, and those imply opposite
+        // things about attention: splitting its heads across both cores
+        // returned 1.35 ms less than a perfect halving predicts, which is
+        // either the two cores queueing for the bus or the layout tax.
+        // See `Head::probe_weight_bandwidth_dual`.
+        let (dbytes, dbw, own_us, worker_us) = head.probe_weight_bandwidth_dual();
+        let scaling = dbw / bw;
+        println!(
+            "PSRAM read (2 cores): {:.0} MB/s aggregate over {:.2} MB              (this core {:.1} ms, worker {:.1} ms) => {:.2}x scaling",
+            dbw,
+            dbytes as f64 / 1e6,
+            own_us as f64 / 1000.0,
+            worker_us as f64 / 1000.0,
+            scaling
+        );
+        // Stated rather than left to be read off, because the whole point of
+        // the probe is that the single-core number was being misread.
+        println!(
+            "  => {}",
+            if scaling >= 1.7 {
+                "bus scales with cores; attention was NOT contending, so the \
+                 head split's 1.35 ms shortfall is placement. An fp16 KV cache \
+                 buys nothing here."
+            } else if scaling <= 1.25 {
+                "bus is saturated by one core; attention IS memory-bound and \
+                 its two cores queue behind each other. Halving the KV cache's \
+                 working set is worth the tolerance it costs."
+            } else {
+                "partial contention; roughly this fraction of the head split's \
+                 shortfall is memory, the rest placement."
+            }
+        );
+        }
     }
     println!();
     let _ = std::io::stdout().flush();
