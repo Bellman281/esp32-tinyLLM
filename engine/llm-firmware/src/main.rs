@@ -319,6 +319,10 @@ fn main() {
     // see head::stage_and_spawn's doc comment for why this port wires it
     // in as a closure parameter instead of a function-pointer struct
     // field.
+    // Locked once for the whole run. See `emit`.
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
     let mut head_matvec = |x: &[f32], y: &mut [f32]| head.matvec(x, y);
     // Every NON-head matvec also goes to both cores. The hook has shipped
     // since Phase 3 with no user -- it was written for esp-dsp, and a
@@ -342,7 +346,7 @@ fn main() {
 
     for &t in prompt_ids.iter() {
         tok = t;
-        emit(tok);
+        emit(&mut out, tok);
         llm_forward_with_head_override(&model, tok, pos, &mut scratch, &mut head_matvec);
         pos += 1;
         // The C reference doesn't feed the watchdog here either (see
@@ -370,6 +374,10 @@ fn main() {
     let t_start = unsafe { esp_timer_get_time() };
     let mut decode_us: i64 = 0;
     let mut decoded = 0usize;
+    // The remainder outside the profiled stages, split. Wall clock minus the
+    // five stages is ~3 ms/token and had never been attributed to anything.
+    let mut argmax_us: i64 = 0;
+    let mut emit_us: i64 = 0;
 
     for step in 0..N_GENERATE {
         if pos >= model.cfg.seq_len {
@@ -378,16 +386,32 @@ fn main() {
         // Greedy: argmax over the trained vocab only (NOT model.cfg.vocab
         // -- see head::stage_and_spawn's doc comment on why rows at/above
         // vocab_n in s.logits are never written and must not be scored).
+        // Slice once, iterate. `vocab_n` is a runtime value, so indexing
+        // `scratch.logits[v]` inside `0..vocab_n` cannot have its bounds check
+        // hoisted -- 25,353 checked loads per token, twice each. Slicing to a
+        // provable length hands the backend the fact instead. Same comparison
+        // order and the same strict `>`, so the same token wins a tie: this is
+        // bit-identical, and `cli_parity.rs` would catch it if it were not.
+        //
+        // This sits OUTSIDE the profiled stages, which is why nobody looked at
+        // it: at a 60 ms gap it was noise. With the model math now at 119.4 ms
+        // against C's 119.8, the ~3 ms outside the stages is the whole
+        // remaining difference on wall clock.
+        let a0 = unsafe { esp_timer_get_time() };
         let mut best = 0usize;
         let mut bv = f32::NEG_INFINITY;
-        for v in 0..vocab_n {
-            if scratch.logits[v] > bv {
-                bv = scratch.logits[v];
+        for (v, &l) in scratch.logits[..vocab_n].iter().enumerate() {
+            if l > bv {
+                bv = l;
                 best = v;
             }
         }
         tok = best;
-        emit(tok);
+        let a1 = unsafe { esp_timer_get_time() };
+        emit(&mut out, tok);
+        let a2 = unsafe { esp_timer_get_time() };
+        argmax_us += a1 - a0;
+        emit_us += a2 - a1;
 
         let d0 = unsafe { esp_timer_get_time() };
         llm_forward_profiled_with_matvec_override(
@@ -446,6 +470,17 @@ fn main() {
     if let Some((calls, wait)) = head.matvec_profile() {
         println!("  split matvecs:  {calls:.0} calls/token | wait-worker {wait:.1} ms/token");
     }
+    if decoded > 0 {
+        let n = decoded as f64 * 1000.0;
+        let stages = decode_us as f64 / n;
+        let wall = total_us as f64 / n;
+        println!(
+            "  outside stages: argmax {:.2} | emit {:.2} | other {:.2} ms/token  (wall {wall:.1} vs forward {stages:.1})",
+            argmax_us as f64 / n,
+            emit_us as f64 / n,
+            wall - stages - (argmax_us + emit_us) as f64 / n
+        );
+    }
     let _ = std::io::stdout().flush();
 
     // Matches C's `void loop() { delay(10000); }` -- setup() (this whole
@@ -462,9 +497,13 @@ fn main() {
 /// 4's territory). This port always blocks on the write for now; revisit
 /// alongside Phase 4's display module, when running without an attached
 /// USB host becomes a real scenario instead of a hypothetical one.
-fn emit(tok: usize) {
+/// Takes the already-locked handle rather than calling `std::io::stdout()`
+/// itself. That call returns a handle whose every `write_all`/`flush` takes a
+/// reentrant lock, so doing it per token paid for two lock acquisitions 400
+/// times for no reason. C's `emit` writes to a bare `FILE *`. The flush stays
+/// -- see below.
+fn emit<W: Write>(out: &mut W, tok: usize) {
     if let Some(bytes) = vocab::decode(tok) {
-        let mut out = std::io::stdout();
         let _ = out.write_all(bytes);
         // Explicit flush, added after the first on-hardware run: without it,
         // every token's bytes just accumulate in stdout's internal buffer
