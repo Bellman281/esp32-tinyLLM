@@ -335,7 +335,7 @@ attn_proj = 2.6
 attn_dual = "qkv proj core"
 
 [run.rust-findings-off]
-label   = "Rust, now"
+label   = "+ probe opt-in"
 engine  = "rust"
 date    = "2026-08-20"
 commit  = "build(firmware): put the bandwidth probe behind a feature (6128d54)"
@@ -372,4 +372,23 @@ attn_qkv  = 7.5
 attn_rope = 0.15
 attn_core = 14.5
 attn_proj = 2.6
+attn_dual = "qkv proj core"
+
+[run.rust-i16-act]
+label   = "Rust, now"
+engine  = "rust"
+date    = "2026-08-20"
+commit  = "perf(head): hold the activation as i16 -- Xtensa has no signed byte load (006f3a7)"
+note    = "head 62.2 -> 55.3 ms, token 106.3 -> 100.0, from deleting ONE instruction per multiply-accumulate. Xtensa has no signed byte load: l8ui zero-extends, so every i8 activation cost a load plus a sext, on 2.43M elements per token. l16si sign-extends in the load. Found by disassembling the firmware (scripts/disasm_head.sh), not by guessing -- stage timing cannot name an instruction. Bit-exact; digest unchanged. THE HEAD NOW BEATS C: 55.3 against 57.1, 0.97x, the last stage to cross over. Still 38% behind C on arithmetic alone (41.9 ms against 30.4, 8.26 cycles/MAC against 5.99) -- the binary shows 814 mull against 19 mula.*, so the LX7 MAC16 unit is essentially unused and that is the next lead."
+input   = 3.9
+attn    = 26.8
+ffn     = 6.2
+ple     = 7.7
+head    = 55.3
+wall_ms = 100.0
+tok_s   = 10.00
+attn_qkv  = 7.9
+attn_rope = 0.15
+attn_core = 16.0
+attn_proj = 2.7
 attn_dual = "qkv proj core"

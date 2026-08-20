@@ -51,7 +51,7 @@ On a board: `cd engine/llm-firmware && cargo run --release`.
 </picture>
 
 Both firmwares emit **byte-identical text** — same 400 tokens, cut off at the same
-word. The board proves it rather than being taken at its word: it folds every
+word. Every stage is now faster than C, the output head included. The board proves it rather than being taken at its word: it folds every
 token id it emits into a digest and prints it, and
 [`model/models.toml`](./model/models.toml) pins the value that
 `llm-host/tests/token_stream_digest.rs` recomputes on the host. A run that
@@ -81,11 +81,12 @@ a firmware that is fast because it computes something else is not a result.
 | **+ MSPI bus 120 MHz** ‡ | 3.6 | 24.5 | 5.7 | 7.0 | 62.1 | 102.9 | **102.9** | 9.71 |
 | **+ int8 head (reverted)** ‡ | 4.0 | 26.8 | 6.2 | 7.6 | 76.9 | 121.5 | **121.6** | 8.23 |
 | **+ probe, always on** ‡ | 3.8 | 26.2 | 6.0 | 7.3 | 63.2 | 106.5 | **106.6** | 9.38 |
-| **Rust, now** | 3.9 | 26.3 | 6.2 | 7.6 | 62.2 | 106.2 | **106.3** | 9.41 |
+| **+ probe opt-in** | 3.9 | 26.3 | 6.2 | 7.6 | 62.2 | 106.2 | **106.3** | 9.41 |
 | **Rust, --fast-mspi** ‡ | 3.8 | 24.7 | 6.0 | 7.3 | 60.9 | 102.7 | **102.6** | 9.75 |
-| ratio vs C reference | 0.89x | 0.61x | 0.90x | 0.89x | 1.09x | 0.89x | **0.87x** | |
-| absolute gap | -0.5 | -16.6 | -0.7 | -0.9 | +5.1 | -13.6 | **-15.7** | |
-| **change this brought** | +0.0 | +0.0 | +0.0 | +0.0 | -0.1 | -0.1 | **+0.0** | |
+| **Rust, now** | 3.9 | 26.8 | 6.2 | 7.7 | 55.3 | 99.9 | **100.0** | 10.00 |
+| ratio vs C reference | 0.89x | 0.62x | 0.90x | 0.91x | 0.97x | 0.83x | **0.82x** | |
+| absolute gap | -0.5 | -16.1 | -0.7 | -0.8 | -1.8 | -19.9 | **-22.0** | |
+| **change this brought** | +0.0 | +0.5 | +0.0 | +0.1 | -6.9 | -6.3 | **-6.3** | |
 
 ‡ **+ MSPI bus 120 MHz is not the shipping configuration** and is excluded from the ratios and the summary below. Requires CONFIG_IDF_EXPERIMENTAL_FEATURES; Espressif documents 120 MHz as temperature-sensitive and not recommended across the industrial range, and this board's boya flash part refused it and fell back. Real, reproducible, bit-exact -- and not what you get by cloning this repo. Available as a +3.3% opt-in; see BENCHMARKING.md.
 ‡ **+ int8 head (reverted) is not the shipping configuration** and is excluded from the ratios and the summary below. A negative result, kept because it corrects a claim this file made. Staging the head as unpacked int8 instead of packed int4 -- the C reference's format, and one fewer operation per element -- made the head 62.3 -> 76.9 ms and the token 106.3 -> 121.5. Reverted. Bit-exact throughout: the digest still printed OK, so this is purely a cost.
@@ -102,10 +103,11 @@ a firmware that is fast because it computes something else is not a result.
 | **+ MSPI bus 120 MHz** | 7.2 | 0.15 | 14.7 | 2.5 | 24.6 | `qkv`, `proj`, `core` |
 | **+ int8 head (reverted)** | 7.9 | 0.15 | 16.0 | 2.7 | 26.8 | `qkv`, `proj`, `core` |
 | **+ probe, always on** | 7.6 | 0.15 | 15.9 | 2.6 | 26.2 | `qkv`, `proj`, `core` |
-| **Rust, now** | 7.8 | 0.15 | 15.6 | 2.7 | 26.2 | `qkv`, `proj`, `core` |
+| **+ probe opt-in** | 7.8 | 0.15 | 15.6 | 2.7 | 26.2 | `qkv`, `proj`, `core` |
 | **Rust, --fast-mspi** | 7.5 | 0.15 | 14.5 | 2.6 | 24.8 | `qkv`, `proj`, `core` |
+| **Rust, now** | 7.9 | 0.15 | 16.0 | 2.7 | 26.8 | `qkv`, `proj`, `core` |
 
-**Rust is 14.8% faster per token than the C reference it was ported from** — 106.3 ms against 122.0, 9.41 tok/s against 8.20, on the same board with byte-identical output. It beats C on 4 of the 5 stages.
+**Rust is 22.0% faster per token than the C reference it was ported from** — 100.0 ms against 122.0, 10.00 tok/s against 8.20, on the same board with byte-identical output. It beats C on 5 of the 5 stages.
 
 <!-- END device-table -->
 
