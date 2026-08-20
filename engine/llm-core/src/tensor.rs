@@ -250,46 +250,67 @@ impl<'a> QT<'a> {
     /// `matvec_range_chunked`'s doc comment for why a real SIMD version of
     /// *this* function is a harder, riskier change than the head's, and
     /// what has to be measured before trusting one.
+    /// `out[i] = dot(row `row_begin + i`, x)` for `i` in `0..out.len()`.
+    ///
+    /// The same arithmetic as `matvec_range`, addressed relative to `out`
+    /// instead of absolutely. That difference is what makes a row split safe
+    /// in ordinary Rust: two cores computing disjoint halves of one output can
+    /// each hold a real `&mut [f32]` from `split_at_mut`, rather than both
+    /// holding a `&mut` to the whole buffer and promising not to overlap.
+    /// `llm-firmware`'s dual-core matvec is the caller; `matvec_range`
+    /// delegates here so there is one loop, not two.
+    ///
+    /// BIT-EXACT against `matvec_range` by construction -- same rows, same
+    /// group order, same left-to-right accumulation within each row, only the
+    /// destination index differs. `llm-host/tests/matvec_split.rs` asserts it
+    /// over every split point of a real tensor.
+    pub fn matvec_rows_into(&self, x: &[f32], out: &mut [f32], row_begin: usize) {
+        debug_assert!(x.len() >= self.cols);
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = self.dot_row(x, row_begin + i);
+        }
+    }
+
+    /// One row's fp32 dot product. Factored out of `matvec_range` so the
+    /// row-relative and row-absolute entry points cannot drift apart.
+    #[inline]
+    fn dot_row(&self, x: &[f32], r: usize) -> f32 {
+        let row = &self.codes[r * self.row_bytes..(r + 1) * self.row_bytes];
+        let mut acc = 0f32;
+        for gi in 0..self.n_groups {
+            let begin = gi * self.group;
+            let end = core::cmp::min(begin + self.group, self.cols);
+            let scale = self.scale(r, gi);
+            let mut group_acc = 0f32;
+            let mut j = begin;
+            if j & 1 == 1 && j < end {
+                group_acc += NIBBLE_F32[(row[j >> 1] >> 4) as usize] * x[j];
+                j += 1;
+            }
+            let pairs = (end - j) / 2;
+            if pairs > 0 {
+                let bytes = &row[j >> 1..(j >> 1) + pairs];
+                let xs = &x[j..j + 2 * pairs];
+                for (b, xp) in bytes.iter().zip(xs.chunks_exact(2)) {
+                    group_acc += NIBBLE_F32[(b & 0xF) as usize] * xp[0];
+                    group_acc += NIBBLE_F32[(b >> 4) as usize] * xp[1];
+                }
+                j += 2 * pairs;
+            }
+            if j < end {
+                let byte = row[j >> 1];
+                let nib = if j & 1 == 1 { byte >> 4 } else { byte & 0xF };
+                group_acc += NIBBLE_F32[nib as usize] * x[j];
+            }
+            acc += group_acc * scale;
+        }
+        acc
+    }
+
     pub fn matvec_range(&self, x: &[f32], y: &mut [f32], row_begin: usize, row_end: usize) {
         debug_assert!(x.len() >= self.cols);
         for r in row_begin..row_end {
-            let row = &self.codes[r * self.row_bytes..(r + 1) * self.row_bytes];
-            let mut acc = 0f32;
-            for gi in 0..self.n_groups {
-                let begin = gi * self.group;
-                let end = core::cmp::min(begin + self.group, self.cols);
-                let scale = self.scale(r, gi);
-                let mut group_acc = 0f32;
-                let mut j = begin;
-                if j & 1 == 1 && j < end {
-                    group_acc += NIBBLE_F32[(row[j >> 1] >> 4) as usize] * x[j];
-                    j += 1;
-                }
-                // Steady state: one packed byte -> two elements, driven by a
-                // `zip` over two slices of a provably matching length rather
-                // than by `j`. Indexing `row[j >> 1]` / `x[j]` / `x[j + 1]`
-                // against runtime-derived bounds made the backend re-prove
-                // three ranges per iteration; sliced up front it has to prove
-                // nothing. Iteration order, and therefore the f32 summation
-                // order, is exactly what the indexed loop produced.
-                let pairs = (end - j) / 2;
-                if pairs > 0 {
-                    let bytes = &row[j >> 1..(j >> 1) + pairs];
-                    let xs = &x[j..j + 2 * pairs];
-                    for (b, xp) in bytes.iter().zip(xs.chunks_exact(2)) {
-                        group_acc += NIBBLE_F32[(b & 0xF) as usize] * xp[0];
-                        group_acc += NIBBLE_F32[(b >> 4) as usize] * xp[1];
-                    }
-                    j += 2 * pairs;
-                }
-                if j < end {
-                    let byte = row[j >> 1];
-                    let nib = if j & 1 == 1 { byte >> 4 } else { byte & 0xF };
-                    group_acc += NIBBLE_F32[nib as usize] * x[j];
-                }
-                acc += group_acc * scale;
-            }
-            y[r] = acc;
+            y[r] = self.dot_row(x, r);
         }
     }
 

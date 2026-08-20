@@ -42,7 +42,7 @@
 //! host-side test can exercise (there's no FreeRTOS on the host).
 
 use core::cell::{Cell, UnsafeCell};
-use core::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::hal::sys::{esp_timer_get_time, TaskHandle_t, TickType_t};
 use esp_idf_svc::hal::task;
@@ -59,6 +59,21 @@ const NOTIFY: core::num::NonZeroU32 = core::num::NonZeroU32::new(1).unwrap();
 /// this head's actual cols (== model dim, 96 on the shipped models) is
 /// always <= this, same fixed-size-scratch choice the C reference makes.
 const MAX_HEAD_COLS: usize = 128;
+
+/// What the worker should do when notified.
+///
+/// The worker exists to run the output head on core 0 while the inference core
+/// runs its own half. But the head is now 61.5 ms of a 137.9 ms token, and the
+/// other 76.4 ms -- input, attn, ffn, ple -- runs on ONE core with this task
+/// parked in `wait_notification`. The fp32 matvecs inside those stages are
+/// 556k multiply-accumulates per token at ~21 cycles each, and splitting them
+/// by rows is bit-exact: `y[r]` depends only on row `r` and `x`, so which core
+/// computes it cannot change the value (asserted at every split point by
+/// `llm-host/tests/matvec_split.rs`).
+///
+/// So the worker takes a second kind of job.
+const JOB_HEAD: u32 = 0;
+const JOB_MATVEC: u32 = 1;
 
 /// Owns the staged int8 head tables, the dual-core job hand-off state, and
 /// both task handles. Always accessed through `&Head` (interior
@@ -111,6 +126,26 @@ pub struct Head {
     prof_wait_us: Cell<u64>,   // blocked on the worker after finishing ours
     prof_worker_us: Cell<u64>, // the worker's row range, timed on the worker
     prof_calls: Cell<u32>,
+
+    // ---- generic parallel matvec ------------------------------------------
+    // Which job the worker should run. Written by whichever core is dispatching
+    // (always the inference core) before the notify that wakes the worker; the
+    // Release on this store publishes every field below it.
+    job_kind: AtomicU32,
+    // The tensor, addressed as `QT<'static>`: llm-firmware's model is
+    // `partition::map_model_partition() -> &'static [u8]`, so every QT bound
+    // from it borrows for `'static`. Valid for the duration of the call
+    // because the inference core holds the `&QT` across the notify/wait.
+    mv_qt: AtomicPtr<QT<'static>>,
+    mv_x: AtomicPtr<f32>,
+    mv_x_len: AtomicUsize,
+    mv_out: AtomicPtr<f32>,   // the WORKER's destination, not the whole output
+    mv_out_len: AtomicUsize,
+    mv_row_begin: AtomicUsize,
+    // Sync cost of the split, which is the thing that could make it a loss:
+    // ~43 matvecs per token, each paying a notify and a wake.
+    prof_mv_wait_us: Cell<u64>,
+    prof_mv_calls: Cell<u32>,
 }
 
 impl Head {
@@ -199,7 +234,9 @@ impl Head {
         let y_ptr = y.as_mut_ptr();
         let split = self.rows / 2;
         self.job_split.store(split, Ordering::Relaxed);
-        self.job_y.store(y_ptr, Ordering::Release);
+        self.job_y.store(y_ptr, Ordering::Relaxed);
+        // Release: publishes job_y/job_split/actq/acts/act_sum to the worker.
+        self.job_kind.store(JOB_HEAD, Ordering::Release);
 
         // SAFETY: `self.worker` was set exactly once in `stage_and_spawn`,
         // before this `Head` was ever returned/reachable, so it's always
@@ -235,6 +272,8 @@ impl Head {
         self.prof_wait_us.set(0);
         self.prof_worker_us.set(0);
         self.prof_calls.set(0);
+        self.prof_mv_wait_us.set(0);
+        self.prof_mv_calls.set(0);
     }
 
     /// `[quantize, own half, wait for worker, worker half]` in ms/token, or
@@ -264,6 +303,84 @@ impl Head {
             self.prof_wait_us.get() as f32 / d,
             self.prof_worker_us.get() as f32 / d,
         ])
+    }
+
+    /// Compute `y[..t.rows] = W * x` with the rows split across both cores.
+    ///
+    /// This is what `llm_forward_*_with_matvec_override` hands every non-head
+    /// matvec to. The hook has existed since Phase 3 and never had a user; it
+    /// was written for an esp-dsp SIMD path, and a dual-core split turns out to
+    /// need exactly the same shape. `llm-core` is unchanged by this.
+    ///
+    /// Rows `[0, split)` go to the worker, `[split, rows)` stay here, and the
+    /// caller blocks until the worker signals. Bit-exact: each output element
+    /// is the same dot product either way, and `QT::matvec_rows_into`
+    /// addresses the destination relative to the slice it is given so neither
+    /// side needs to know about the other's rows.
+    ///
+    /// No size threshold. The smallest matvec in this model is `gate`/`up` at
+    /// 66x96 = 6,336 MACs, about 0.55 ms on one core, against a notify/wake
+    /// round trip in the tens of microseconds. If a future model has matvecs
+    /// small enough for that to invert, this is where the threshold goes.
+    ///
+    /// # Panics
+    /// Debug-only: `y` must be at least `t.rows` long and `x` at least
+    /// `t.cols`, the same contract `QT::matvec` has.
+    pub fn matvec_parallel(&self, t: &QT, x: &[f32], y: &mut [f32]) {
+        let rows = t.rows;
+        debug_assert!(y.len() >= rows);
+        debug_assert!(x.len() >= t.cols);
+        let split = rows / 2;
+
+        // Raw pointer once, then two disjoint ranges -- the same structure
+        // `matvec`/`rows_range` use below, and for the same reason: two OS
+        // threads write disjoint sub-ranges of one allocation concurrently,
+        // which `&mut [f32]` cannot express.
+        let y_ptr = y.as_mut_ptr();
+
+        self.mv_qt
+            .store(t as *const QT as *mut QT<'static>, Ordering::Relaxed);
+        self.mv_x.store(x.as_ptr() as *mut f32, Ordering::Relaxed);
+        self.mv_x_len.store(x.len(), Ordering::Relaxed);
+        self.mv_out.store(y_ptr, Ordering::Relaxed);
+        self.mv_out_len.store(split, Ordering::Relaxed);
+        self.mv_row_begin.store(0, Ordering::Relaxed);
+        // Release: publishes every field above to the worker.
+        self.job_kind.store(JOB_MATVEC, Ordering::Release);
+
+        // SAFETY: `self.worker` was set once in `stage_and_spawn`, before this
+        // `Head` was reachable.
+        let _ = unsafe { task::notify(self.worker.get(), NOTIFY) };
+
+        // SAFETY: rows [split, rows) are this call's alone until it returns --
+        // the worker only ever writes [0, split) for a JOB_MATVEC (see
+        // `head_worker_main`). Disjoint by construction.
+        let hi = unsafe { core::slice::from_raw_parts_mut(y_ptr.add(split), rows - split) };
+        t.matvec_rows_into(x, hi, split);
+
+        let t0 = unsafe { esp_timer_get_time() };
+        let _ = task::wait_notification(TickType_t::MAX);
+        let t1 = unsafe { esp_timer_get_time() };
+        self.prof_mv_wait_us
+            .set(self.prof_mv_wait_us.get() + (t1 - t0) as u64);
+        self.prof_mv_calls.set(self.prof_mv_calls.get() + 1);
+    }
+
+    /// `(matvec calls per token, ms/token spent waiting on the worker)`.
+    ///
+    /// The wait figure is what says whether the split paid: it is the sync cost
+    /// plus whatever imbalance the row split leaves. Large means the halves are
+    /// uneven or the wake latency is worse than assumed; near zero means the
+    /// two cores finish together and the split is free.
+    pub fn matvec_profile(&self) -> Option<(f32, f32)> {
+        let n = self.prof_calls.get();
+        if n == 0 {
+            return None;
+        }
+        Some((
+            self.prof_mv_calls.get() as f32 / n as f32,
+            self.prof_mv_wait_us.get() as f32 / (n as f32 * 1000.0),
+        ))
     }
 
     /// Measure sequential read bandwidth over this head's own staged weights,
@@ -304,17 +421,41 @@ extern "C" fn head_worker_main(arg: *mut core::ffi::c_void) {
     let head: &'static Head = unsafe { &*(arg as *const Head) };
     loop {
         let _ = task::wait_notification(TickType_t::MAX);
-        let split = head.job_split.load(Ordering::Acquire);
-        let y_ptr = head.job_y.load(Ordering::Acquire);
-        // SAFETY: rows [0, split) belong exclusively to this call until
-        // the notify below -- `Head::matvec`, which set up this job, only
-        // ever writes [split, rows) itself (see its doc comment).
-        let w0 = unsafe { esp_timer_get_time() };
-        unsafe { head.rows_range(y_ptr, 0, split) };
-        let w1 = unsafe { esp_timer_get_time() };
-        // Only this task writes this counter; see the field's doc comment.
-        head.prof_worker_us
-            .set(head.prof_worker_us.get() + (w1 - w0) as u64);
+        // Acquire pairs with the Release store of `job_kind` by whichever
+        // dispatcher set this job up, and publishes that job's fields.
+        match head.job_kind.load(Ordering::Acquire) {
+            JOB_MATVEC => {
+                let qt = head.mv_qt.load(Ordering::Relaxed);
+                let xp = head.mv_x.load(Ordering::Relaxed);
+                let xn = head.mv_x_len.load(Ordering::Relaxed);
+                let op = head.mv_out.load(Ordering::Relaxed);
+                let on = head.mv_out_len.load(Ordering::Relaxed);
+                let rb = head.mv_row_begin.load(Ordering::Relaxed);
+                // SAFETY: the dispatcher holds the `&QT` and both slices alive
+                // across the notify/wait, and writes only rows outside
+                // [rb, rb+on) itself -- see `Head::matvec_parallel`. The QT
+                // borrows the 'static flash mapping.
+                unsafe {
+                    let t: &QT<'static> = &*qt;
+                    let x = core::slice::from_raw_parts(xp as *const f32, xn);
+                    let out = core::slice::from_raw_parts_mut(op, on);
+                    t.matvec_rows_into(x, out, rb);
+                }
+            }
+            _ => {
+                let split = head.job_split.load(Ordering::Relaxed);
+                let y_ptr = head.job_y.load(Ordering::Relaxed);
+                // SAFETY: rows [0, split) belong exclusively to this call until
+                // the notify below -- `Head::matvec`, which set up this job,
+                // only ever writes [split, rows) itself.
+                let w0 = unsafe { esp_timer_get_time() };
+                unsafe { head.rows_range(y_ptr, 0, split) };
+                let w1 = unsafe { esp_timer_get_time() };
+                // Only this task writes this counter.
+                head.prof_worker_us
+                    .set(head.prof_worker_us.get() + (w1 - w0) as u64);
+            }
+        }
         let _ = unsafe { task::notify(head.inference_task, NOTIFY) };
     }
 }
@@ -384,6 +525,15 @@ pub fn stage_and_spawn(tok_emb: QT<'static>, vocab_n: usize) -> Result<&'static 
         prof_wait_us: Cell::new(0),
         prof_worker_us: Cell::new(0),
         prof_calls: Cell::new(0),
+        job_kind: AtomicU32::new(JOB_HEAD),
+        mv_qt: AtomicPtr::new(core::ptr::null_mut()),
+        mv_x: AtomicPtr::new(core::ptr::null_mut()),
+        mv_x_len: AtomicUsize::new(0),
+        mv_out: AtomicPtr::new(core::ptr::null_mut()),
+        mv_out_len: AtomicUsize::new(0),
+        mv_row_begin: AtomicUsize::new(0),
+        prof_mv_wait_us: Cell::new(0),
+        prof_mv_calls: Cell::new(0),
     }));
 
     // SAFETY: `head_worker_main` is a valid `extern "C" fn(*mut c_void)`;

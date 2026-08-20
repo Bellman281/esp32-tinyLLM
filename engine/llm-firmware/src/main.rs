@@ -27,7 +27,9 @@ mod psram;
 mod vocab;
 
 use esp_idf_svc::hal::sys::esp_timer_get_time;
-use llm_core::{llm_forward_profiled, llm_forward_with_head_override, Model, Profile};
+use llm_core::{
+    llm_forward_profiled_with_matvec_override, llm_forward_with_head_override, Model, Profile, QT,
+};
 use std::io::Write;
 use std::time::Duration;
 
@@ -318,6 +320,12 @@ fn main() {
     // in as a closure parameter instead of a function-pointer struct
     // field.
     let mut head_matvec = |x: &[f32], y: &mut [f32]| head.matvec(x, y);
+    // Every NON-head matvec also goes to both cores. The hook has shipped
+    // since Phase 3 with no user -- it was written for esp-dsp, and a
+    // dual-core row split needs the same shape. input/attn/ffn/ple were 55% of
+    // a token running on one core with the worker parked; splitting by rows is
+    // bit-exact (llm-host/tests/matvec_split.rs asserts every split point).
+    let mut split_matvec = |t: &QT, x: &[f32], y: &mut [f32]| head.matvec_parallel(t, x, y);
 
     let prompt_ids = if STDIN_PROMPT {
         read_prompt_ids()
@@ -382,12 +390,13 @@ fn main() {
         emit(tok);
 
         let d0 = unsafe { esp_timer_get_time() };
-        llm_forward_profiled(
+        llm_forward_profiled_with_matvec_override(
             &model,
             tok,
             pos,
             &mut scratch,
             &mut head_matvec,
+            &mut split_matvec,
             &mut || unsafe { esp_timer_get_time() as u64 },
             &mut prof,
         );
@@ -430,6 +439,12 @@ fn main() {
         println!(
             "  head detail:    quant {quant:.2} | own-half {own:.1} | wait-worker {wait:.1} | worker-half {worker:.1}"
         );
+    }
+    // Sync cost of splitting the non-head matvecs. `wait` is the sum of every
+    // block on the worker across ~43 matvecs per token: it is the price the
+    // split pays, and the thing that decides whether it was worth paying.
+    if let Some((calls, wait)) = head.matvec_profile() {
+        println!("  split matvecs:  {calls:.0} calls/token | wait-worker {wait:.1} ms/token");
     }
     let _ = std::io::stdout().flush();
 
