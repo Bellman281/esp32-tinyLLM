@@ -32,6 +32,9 @@ either firmware drifts from them.
 | ms/token | input | attn | ffn | ple | head | stages | **wall** | tok/s |
 |---|---|---|---|---|---|---|---|---|
 | **C reference** | 4.4 | 42.9 | 6.9 | 8.5 | 57.1 | 119.8 | **122.0** | 8.20 |
+| **Rust, first run** | 10.6 | 66.7 | 15.8 | 20.4 | 193.8 | 307.3 | **311.5** | 3.21 |
+| **+ dual-core head, unroll** | 8.0 | 58.9 | 11.8 | 15.1 | 110.9 | 204.7 | **208.8** | 4.79 |
+| **+ wider caches** | 7.4 | 53.7 | 11.2 | 14.3 | 87.6 | 174.2 | **177.3** | 5.64 |
 | **Rust, before** | 7.8 | 54.4 | 11.9 | 15.2 | 94.6 | 183.9 | **187.2** | 5.34 |
 | **Rust, nibble LUT** | 6.6 | 50.8 | 10.1 | 12.7 | 98.0 | 178.2 | **181.6** | 5.51 |
 | **Rust, + KV layout** | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | 171.2 | **174.6** | 5.73 |
@@ -40,10 +43,19 @@ either firmware drifts from them.
 | **+ bias hoist** | 6.6 | 47.0 | 10.1 | 12.7 | 61.5 | 137.9 | **140.9** | 7.09 |
 | **+ dual-core matvec** | 3.9 | 40.2 | 6.2 | 7.5 | 61.6 | 119.4 | **122.7** | 8.15 |
 | **+ argmax/stdout** | 3.8 | 39.8 | 6.0 | 7.3 | 61.5 | 118.4 | **121.1** | 8.25 |
-| **Rust, now** | 3.9 | 40.0 | 6.1 | 7.5 | 61.5 | 119.0 | **119.0** | 8.40 |
-| ratio vs C reference | 0.89x | 0.93x | 0.88x | 0.88x | 1.08x | 0.99x | **0.98x** | |
-| absolute gap | -0.5 | -2.9 | -0.8 | -1.0 | +4.4 | -0.8 | **-3.0** | |
-| **change this brought** | +0.1 | +0.2 | +0.1 | +0.2 | +0.0 | +0.6 | **-2.1** | |
+| **+ argmax in head** | 3.9 | 40.0 | 6.1 | 7.5 | 61.5 | 119.0 | **119.0** | 8.40 |
+| **+ attn instrumented** | 3.9 | 39.0 | 6.2 | 7.6 | 61.9 | 118.6 | **118.5** | 8.43 |
+| ratio vs C reference | 0.89x | 0.91x | 0.90x | 0.89x | 1.08x | 0.99x | **0.97x** | |
+| absolute gap | -0.5 | -3.9 | -0.7 | -0.9 | +4.8 | -1.2 | **-3.5** | |
+| **change this brought** | +0.0 | -1.0 | +0.1 | +0.1 | +0.4 | -0.4 | **-0.5** | |
+
+**`attn` broken down** — the sub-stages the five-stage profile hides. `qkv`/`proj` are the fp32 matvec that also drives `ffn` and `ple`; `core` is attention proper, the only part that grows with sequence position. The C reference has no equivalent instrumentation, so it is absent rather than zero.
+
+| attn ms/token | qkv | rope | core | proj | sum | both cores |
+|---|---|---|---|---|---|---|
+| **+ attn instrumented** | 7.8 | 0.14 | 28.3 | 2.7 | 38.9 | `qkv`, `proj` |
+
+**Rust is 3.0% faster per token than the C reference it was ported from** — 118.5 ms against 122.0, 8.43 tok/s against 8.20, on the same board with byte-identical output. It beats C on 4 of the 5 stages.
 
 <!-- END device-table -->
 
@@ -373,21 +385,17 @@ both firmwares' constants against the registry.
 
 ## Optimization history (Rust)
 
-| ms/token | input | attn | ffn | ple | head | total | tok/s |
-|---|---|---|---|---|---|---|---|
-| first run | 10.6 | 66.7 | 15.8 | 20.4 | 193.8 | 307.4 | 3.21 |
-| + dual-core, byte-pair unroll | 8.0 | 58.9 | 11.8 | 15.1 | 110.9 | 204.8 | 4.79 |
-| + wider caches | 7.4 | 53.7 | 11.2 | 14.3 | 87.6 | 174.2 | 5.64 |
-| + nibble LUT, pair-unrolled unpack | 6.6 | 50.8 | 10.1 | 12.7 | 98.0 | 178.2 | 5.51 |
-| + per-head KV layout | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | 171.2 | 5.73 |
-| + int4-staged head | 6.6 | 47.0 | 10.1 | 12.7 | 94.8 | 171.2 | 5.73 |
-| + 4 accumulators in the head dot | 6.6 | 47.0 | 10.1 | 12.7 | 81.3 | 157.7 | 6.21 |
-| + bias hoist, drop the LUT | 6.6 | 47.0 | 10.1 | 12.7 | 61.5 | 137.9 | 7.09 |
-| + dual-core matvec | 3.9 | 40.2 | 6.2 | 7.5 | 61.6 | 119.4 | 8.15 |
-| + argmax/stdout (outside the stages) | 3.8 | 39.8 | 6.0 | 7.3 | 61.5 | 118.4 | 8.25 |
+The full history is the generated table at the top of this file — it is the
+same measurements, from `benchmarks/device.toml`, and there is deliberately
+no second copy here. A hand-written duplicate lived at this spot until it
+went two runs stale, which is the whole argument for the generator: three
+of its rows (`first run`, `+ dual-core head, unroll`, `+ wider caches`)
+existed **only** here and have been migrated into `device.toml`, where they
+are flagged as migrated with `wall_ms` derived from `tok/s` rather than
+measured.
 
-All at 400 tokens / 18-token prompt, so comparable to each other and to the
-C row above. Three changes, in order of what they were worth:
+All rows are at 400 tokens / 18-token prompt, so they are comparable to each
+other and to the C reference. Three changes, in order of what they were worth:
 
 1. **The dual-core head split was not actually dual-core.** `head.rs` pins
    its worker to CPU0, faithfully copying the C reference's
