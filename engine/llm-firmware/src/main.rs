@@ -28,7 +28,8 @@ mod vocab;
 
 use esp_idf_svc::hal::sys::esp_timer_get_time;
 use llm_core::{
-    llm_forward_profiled_with_matvec_override, llm_forward_with_head_override, Model, Profile, QT,
+    llm_forward_profiled_with_overrides, llm_forward_with_head_override, HeadsJob, Model, Profile,
+    QT,
 };
 use std::io::Write;
 use std::time::Duration;
@@ -291,6 +292,24 @@ fn main() {
         }
     };
 
+    // Whether attention will actually use both cores, said once at boot rather
+    // than left to be inferred from a zero in the profile -- a fallback and a
+    // perfectly balanced split both print `wait-worker 0.0`.
+    if model.cfg.n_heads >= 2 && model.cfg.seq_len <= head::MAX_ATTN_SEQ {
+        log::info!(
+            "attn heads split {}/{} across cores",
+            model.cfg.n_heads / 2,
+            model.cfg.n_heads - model.cfg.n_heads / 2
+        );
+    } else {
+        log::warn!(
+            "attn heads NOT split (n_heads={} seq_len={} > MAX_ATTN_SEQ={}): single core",
+            model.cfg.n_heads,
+            model.cfg.seq_len,
+            head::MAX_ATTN_SEQ
+        );
+    }
+
     let mut scratch = psram::alloc_scratch_psram(&model.cfg);
     println!("PSRAM free after alloc: {} KB", psram::free_psram_bytes() / 1024);
 
@@ -330,6 +349,11 @@ fn main() {
     // a token running on one core with the worker parked; splitting by rows is
     // bit-exact (llm-host/tests/matvec_split.rs asserts every split point).
     let mut split_matvec = |t: &QT, x: &[f32], y: &mut [f32]| head.matvec_parallel(t, x, y);
+    // The same worker, a third kind of job. `matvec_override` cannot reach
+    // attention -- attention is not a matvec -- which left `attn`'s core loop
+    // as the largest single-core stage once the matvecs were split. See
+    // `Head::attn_parallel`.
+    let mut split_attn = |job: HeadsJob| head.attn_parallel(job);
 
     let prompt_ids = if STDIN_PROMPT {
         read_prompt_ids()
@@ -403,13 +427,14 @@ fn main() {
         emit_us += a2 - a1;
 
         let d0 = unsafe { esp_timer_get_time() };
-        llm_forward_profiled_with_matvec_override(
+        llm_forward_profiled_with_overrides(
             &model,
             tok,
             pos,
             &mut scratch,
             &mut head_matvec,
             &mut split_matvec,
+            &mut split_attn,
             &mut || unsafe { esp_timer_get_time() as u64 },
             &mut prof,
         );
@@ -466,6 +491,14 @@ fn main() {
     // split pays, and the thing that decides whether it was worth paying.
     if let Some((calls, wait)) = head.matvec_profile() {
         println!("  split matvecs:  {calls:.0} calls/token | wait-worker {wait:.1} ms/token");
+    }
+    // Same for attention's heads: one round trip per layer instead of per
+    // matvec, so the sync cost should be roughly a seventh of the line above.
+    // `own + wait` is what the `core` figure in `attn detail` is made of.
+    if let Some((calls, own, wait)) = head.attn_profile() {
+        println!(
+            "  split attn:     {calls:.0} calls/token | own-heads {own:.1} | wait-worker {wait:.1} ms/token"
+        );
     }
     if decoded > 0 {
         let n = decoded as f64 * 1000.0;

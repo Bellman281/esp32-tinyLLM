@@ -72,8 +72,33 @@ const MAX_HEAD_COLS: usize = 128;
 /// `llm-host/tests/matvec_split.rs`).
 ///
 /// So the worker takes a second kind of job.
+///
+/// And then a third. The matvec hook cannot reach attention, because attention
+/// is not a matvec. Instrumenting the `attn` stage four ways gave
+/// `qkv 7.8 | rope 0.14 | core 28.3 | proj 2.7` ms/token: `qkv` and `proj` are
+/// matvecs and were already split, `rope` is nothing, and `core` -- 24% of a
+/// token -- was the largest thing left still running on one LX7 with this task
+/// parked in `wait_notification`.
+///
+/// Attention heads divide exactly as matvec rows do: each head reads the whole
+/// (already stored) KV cache and writes only its own `head_dim` slice of the
+/// output, so no dot product changes and nothing reorders.
+/// `llm-host/tests/attn_split.rs` holds every split point of the shipped model
+/// to bit-for-bit agreement across a 24-token generation.
 const JOB_HEAD: u32 = 0;
 const JOB_MATVEC: u32 = 1;
+const JOB_ATTN: u32 = 2;
+
+/// Ceiling on `seq_len` for the split attention path, because each core needs
+/// its own `scores` scratch and these are fixed-size `[f32; N]` in `.bss`
+/// rather than another PSRAM allocation -- 2 KB each, and `scores` is the
+/// hottest small buffer in the stage, read and written once per position per
+/// head. The shipped model is `seq_len = 512`.
+///
+/// Same shape of decision as `MAX_HEAD_COLS` above, and checked the same way:
+/// `attn_parallel` refuses to split rather than truncating, so a larger model
+/// gets the single-core path and correct output instead of a silent overrun.
+pub const MAX_ATTN_SEQ: usize = 512;
 
 /// Owns the staged int8 head tables, the dual-core job hand-off state, and
 /// both task handles. Always accessed through `&Head` (interior
@@ -163,6 +188,39 @@ pub struct Head {
     // ~43 matvecs per token, each paying a notify and a wake.
     prof_mv_wait_us: Cell<u64>,
     prof_mv_calls: Cell<u32>,
+
+    // ---- parallel attention heads -----------------------------------------
+    // The `HeadsJob` handed over for a JOB_ATTN, flattened into pointers and
+    // lengths. Every one is valid only for the duration of one
+    // `attn_parallel` call, which holds the borrows across the notify/wait --
+    // same contract as the mv_* fields above.
+    at_q: AtomicPtr<f32>,
+    at_kc: AtomicPtr<f32>,
+    at_vc: AtomicPtr<f32>,
+    at_kv_len: AtomicUsize, // n_heads * seq_len * head_dim, both caches
+    at_out: AtomicPtr<f32>, // the WORKER's slice of att_out, not the whole
+    at_out_len: AtomicUsize,
+    at_pos: AtomicUsize,
+    at_head_dim: AtomicUsize,
+    at_seq_len: AtomicUsize,
+    at_h0: AtomicUsize,
+    at_h1: AtomicUsize,
+
+    // Per-head softmax scratch, one per core. This is the only part of the
+    // head split that is not free: `scores` is reused per head, so two cores
+    // running different head ranges at the same time need two buffers.
+    //
+    // `scores_a` is written only by the inference core inside `attn_parallel`,
+    // `scores_b` only by the worker inside a JOB_ATTN. Neither is ever read by
+    // the other core -- unlike `actq`, which is shared, these are genuinely
+    // private to one task each and merely live in a shared struct because that
+    // is where the worker can reach its own.
+    scores_a: UnsafeCell<[f32; MAX_ATTN_SEQ]>,
+    scores_b: UnsafeCell<[f32; MAX_ATTN_SEQ]>,
+
+    prof_attn_wait_us: Cell<u64>,
+    prof_attn_own_us: Cell<u64>,
+    prof_attn_calls: Cell<u32>,
 }
 
 impl Head {
@@ -303,6 +361,9 @@ impl Head {
         self.prof_calls.set(0);
         self.prof_mv_wait_us.set(0);
         self.prof_mv_calls.set(0);
+        self.prof_attn_wait_us.set(0);
+        self.prof_attn_own_us.set(0);
+        self.prof_attn_calls.set(0);
     }
 
     /// `[quantize, own half, wait for worker, worker half]` in ms/token, or
@@ -419,6 +480,142 @@ impl Head {
         self.prof_mv_calls.set(self.prof_mv_calls.get() + 1);
     }
 
+    /// Run one layer's attention heads with the heads split across both cores.
+    ///
+    /// This is what `llm_forward_profiled_with_overrides` hands each layer's
+    /// `HeadsJob` to, after `store_kv` has already put this position's k/v in
+    /// the cache. Heads `[0, mid)` stay here, `[mid, n_heads)` go to the
+    /// worker; both read the same immutable cache and write disjoint slices of
+    /// `att_out`.
+    ///
+    /// Bit-exact, and for a simpler reason than the matvec split: each head's
+    /// softmax and weighted sum are computed by exactly one core, in exactly
+    /// the same order, over exactly the same values. Nothing is combined
+    /// across the boundary -- there is no reduction to reassociate. Asserted
+    /// at every split point over a 24-token generation by
+    /// `llm-host/tests/attn_split.rs`.
+    ///
+    /// Falls back to running every head here when the split cannot help or
+    /// cannot be done safely: fewer than two heads to divide, or a `seq_len`
+    /// past `MAX_ATTN_SEQ`. Correct either way -- only slower.
+    ///
+    /// One round trip per layer, so 6 per token on the shipped model, against
+    /// ~43 for the matvecs. The sync cost is charged to `prof_attn_wait_us`.
+    pub fn attn_parallel(&self, job: llm_core::HeadsJob) {
+        let llm_core::HeadsJob {
+            q,
+            kcache_layer,
+            vcache_layer,
+            att_out,
+            pos,
+            n_heads,
+            head_dim,
+            seq_len,
+        } = job;
+        let t0 = unsafe { esp_timer_get_time() };
+
+        // SAFETY: `scores_a` is written only here, on the inference core, and
+        // `attn_parallel` never runs concurrently with itself -- the decode
+        // loop is sequential. The worker never touches it.
+        let scores_a: &mut [f32] = unsafe {
+            let arr: &mut [f32; MAX_ATTN_SEQ] = &mut *self.scores_a.get();
+            &mut arr[..]
+        };
+
+        let mid = n_heads / 2;
+        if mid == 0 || seq_len > MAX_ATTN_SEQ {
+            // Nothing to divide, or no room for the worker's scratch. See the
+            // doc comment: slower, never wrong.
+            llm_core::attention::heads(
+                q,
+                kcache_layer,
+                vcache_layer,
+                att_out,
+                scores_a,
+                pos,
+                head_dim,
+                seq_len,
+                0,
+                n_heads,
+            );
+            let t1 = unsafe { esp_timer_get_time() };
+            self.prof_attn_own_us
+                .set(self.prof_attn_own_us.get() + (t1 - t0) as u64);
+            self.prof_attn_calls.set(self.prof_attn_calls.get() + 1);
+            return;
+        }
+
+        // Split the output first, then immediately reduce the worker's half to
+        // a raw pointer and stop naming it -- the same structure
+        // `matvec_parallel` uses, and for the same reason: a `&mut [f32]` may
+        // not be live on this stack while another task writes through it.
+        let (lo, hi) = att_out.split_at_mut(mid * head_dim);
+        let hi_ptr = hi.as_mut_ptr();
+        let hi_len = hi.len();
+
+        self.at_q.store(q.as_ptr() as *mut f32, Ordering::Relaxed);
+        self.at_kc
+            .store(kcache_layer.as_ptr() as *mut f32, Ordering::Relaxed);
+        self.at_vc
+            .store(vcache_layer.as_ptr() as *mut f32, Ordering::Relaxed);
+        self.at_kv_len.store(kcache_layer.len(), Ordering::Relaxed);
+        self.at_out.store(hi_ptr, Ordering::Relaxed);
+        self.at_out_len.store(hi_len, Ordering::Relaxed);
+        self.at_pos.store(pos, Ordering::Relaxed);
+        self.at_head_dim.store(head_dim, Ordering::Relaxed);
+        self.at_seq_len.store(seq_len, Ordering::Relaxed);
+        self.at_h0.store(mid, Ordering::Relaxed);
+        self.at_h1.store(n_heads, Ordering::Relaxed);
+        // Release: publishes every field above to the worker.
+        self.job_kind.store(JOB_ATTN, Ordering::Release);
+
+        // SAFETY: `self.worker` was set once in `stage_and_spawn`, before this
+        // `Head` was reachable.
+        let _ = unsafe { task::notify(self.worker.get(), NOTIFY) };
+
+        llm_core::attention::heads(
+            q,
+            kcache_layer,
+            vcache_layer,
+            lo,
+            scores_a,
+            pos,
+            head_dim,
+            seq_len,
+            0,
+            mid,
+        );
+
+        let t1 = unsafe { esp_timer_get_time() };
+        let _ = task::wait_notification(TickType_t::MAX);
+        let t2 = unsafe { esp_timer_get_time() };
+        self.prof_attn_own_us
+            .set(self.prof_attn_own_us.get() + (t1 - t0) as u64);
+        self.prof_attn_wait_us
+            .set(self.prof_attn_wait_us.get() + (t2 - t1) as u64);
+        self.prof_attn_calls.set(self.prof_attn_calls.get() + 1);
+    }
+
+    /// `(attention calls per token, ms/token in this core's heads, ms/token
+    /// waiting on the worker's)`, or `None` before any timed call.
+    ///
+    /// `wait` is what says whether the split paid. With an even head count the
+    /// two ranges are the same arithmetic, so anything much above the ~12 us
+    /// round trip the matvec split measured is imbalance from somewhere else
+    /// -- core 0 also services interrupts -- rather than from the work.
+    pub fn attn_profile(&self) -> Option<(f32, f32, f32)> {
+        let n = self.prof_calls.get();
+        if n == 0 {
+            return None;
+        }
+        let d = n as f32 * 1000.0;
+        Some((
+            self.prof_attn_calls.get() as f32 / n as f32,
+            self.prof_attn_own_us.get() as f32 / d,
+            self.prof_attn_wait_us.get() as f32 / d,
+        ))
+    }
+
     /// `(matvec calls per token, ms/token spent waiting on the worker)`.
     ///
     /// The wait figure is what says whether the split paid: it is the sync cost
@@ -493,6 +690,44 @@ extern "C" fn head_worker_main(arg: *mut core::ffi::c_void) {
                     let x = core::slice::from_raw_parts(xp as *const f32, xn);
                     let out = core::slice::from_raw_parts_mut(op, on);
                     t.matvec_rows_into(x, out, rb);
+                }
+            }
+            JOB_ATTN => {
+                let dh = head.at_head_dim.load(Ordering::Relaxed);
+                let seq = head.at_seq_len.load(Ordering::Relaxed);
+                let h0 = head.at_h0.load(Ordering::Relaxed);
+                let h1 = head.at_h1.load(Ordering::Relaxed);
+                let kv_len = head.at_kv_len.load(Ordering::Relaxed);
+                let pos = head.at_pos.load(Ordering::Relaxed);
+                let qp = head.at_q.load(Ordering::Relaxed);
+                let kcp = head.at_kc.load(Ordering::Relaxed);
+                let vcp = head.at_vc.load(Ordering::Relaxed);
+                let op = head.at_out.load(Ordering::Relaxed);
+                let on = head.at_out_len.load(Ordering::Relaxed);
+                // SAFETY: `Head::attn_parallel` holds `q`, both caches and its
+                // own half of `att_out` alive across the notify/wait, and
+                // writes only heads [0, h0) -- a disjoint prefix of the same
+                // output buffer. The caches are read-only for both cores here:
+                // `store_kv` ran in `llm_forward_impl` before either was
+                // notified. `scores_b` is this task's alone; see the field.
+                unsafe {
+                    let q = core::slice::from_raw_parts(qp as *const f32, h1 * dh);
+                    let kc = core::slice::from_raw_parts(kcp as *const f32, kv_len);
+                    let vc = core::slice::from_raw_parts(vcp as *const f32, kv_len);
+                    let out = core::slice::from_raw_parts_mut(op, on);
+                    let sc: &mut [f32; MAX_ATTN_SEQ] = &mut *head.scores_b.get();
+                    llm_core::attention::heads(
+                        q,
+                        kc,
+                        vc,
+                        out,
+                        &mut sc[..],
+                        pos,
+                        dh,
+                        seq,
+                        h0,
+                        h1,
+                    );
                 }
             }
             _ => {
@@ -595,6 +830,22 @@ pub fn stage_and_spawn(tok_emb: QT<'static>, vocab_n: usize) -> Result<&'static 
         mv_row_begin: AtomicUsize::new(0),
         prof_mv_wait_us: Cell::new(0),
         prof_mv_calls: Cell::new(0),
+        at_q: AtomicPtr::new(core::ptr::null_mut()),
+        at_kc: AtomicPtr::new(core::ptr::null_mut()),
+        at_vc: AtomicPtr::new(core::ptr::null_mut()),
+        at_kv_len: AtomicUsize::new(0),
+        at_out: AtomicPtr::new(core::ptr::null_mut()),
+        at_out_len: AtomicUsize::new(0),
+        at_pos: AtomicUsize::new(0),
+        at_head_dim: AtomicUsize::new(0),
+        at_seq_len: AtomicUsize::new(0),
+        at_h0: AtomicUsize::new(0),
+        at_h1: AtomicUsize::new(0),
+        scores_a: UnsafeCell::new([0f32; MAX_ATTN_SEQ]),
+        scores_b: UnsafeCell::new([0f32; MAX_ATTN_SEQ]),
+        prof_attn_wait_us: Cell::new(0),
+        prof_attn_own_us: Cell::new(0),
+        prof_attn_calls: Cell::new(0),
     }));
 
     // SAFETY: `head_worker_main` is a valid `extern "C" fn(*mut c_void)`;
