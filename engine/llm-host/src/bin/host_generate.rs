@@ -51,7 +51,7 @@ fn main() {
     // "Once upon a time" (this tokenizer) -- reference-c/esp32-llm-lab/host_generate.c's
     // own hardcoded prompt array, kept verbatim for parity. (Note: with the
     // vocab.h bundled alongside it in this snapshot, these ids do NOT
-    // actually decode to "Once upon a time" -- see MIGRATION_PLAN.md notes.
+    // actually decode to "Once upon a time" -- a known property of this vocab.
     // Reproducing the C reference exactly, not "fixing" it, is the point of
     // this binary.)
     let prompt = [336usize, 337, 258, 338];

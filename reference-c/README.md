@@ -83,7 +83,7 @@ To restore stock upstream behaviour: revert those lines (`git log
 | `firmware/bandwidth_bench/bandwidth_bench.ino` | Raw cycle-counter PSRAM/SRAM/flash bandwidth benchmark | standalone port (Phase 5, optional) |
 
 Not copied here (out of scope, stays entirely in Python, upstream only, see
-`/MIGRATION_PLAN.md`): the training/quantization/export pipeline itself
+the port's ground rules): the training/quantization/export pipeline itself
 (`src/*.py`, `data/prepare.py` and friends) and everything under
 `data/`, `runs/` in `slvDev/esp32-ai`. `chat.py` and its tokenizer JSON are
 also not here — this folder stays strictly C/C++/Arduino. That interactive

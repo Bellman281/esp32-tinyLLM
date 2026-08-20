@@ -1,4 +1,4 @@
-//! Dual-core int8-staged output head -- ports the C reference's
+//! Dual-core packed-int4 output head -- ports the C reference's
 //! `stage_head_int8`, `head_worker_main`, `head_matvec_int8`, `dot_i8`, and
 //! `head_rows_range`, plus the task-handle/job plumbing around them
 //! (`head_worker`, `inference_task`, `head_job_y`, `head_job_split`) from
@@ -29,6 +29,19 @@
 //! is documented at each unsafe block below rather than enforced by the
 //! type system, same as it's an unenforced (but true) invariant in the C
 //! code.
+//!
+//! DIVERGES FROM C, deliberately and bit-exactly, in four places. The C
+//! reference stages the head as unpacked int8 (2.54 MB); this stages the
+//! packed int4 codes as they sit in the model file (1.32 MB) and unpacks in
+//! the loop -- measured, and re-staging as int8 was measured too and cost
+//! 14.6 ms. The activation is held as `i16` rather than `i8`, because the LX7
+//! has no signed byte load and `l8ui` + `sext` is two instructions where
+//! `l16si` is one. Rows are computed two at a time (`dot2_int4_int16`) so each
+//! activation load feeds two multiply-accumulates. And the greedy pick is
+//! folded in here rather than run as a separate pass over 25,353 logits.
+//! Every one of those is asserted bit-for-bit against the form it replaced by
+//! a test in `llm-host/tests/`, and the board prints a digest of its whole
+//! token stream. See BENCHMARKING.md for what each one bought.
 //!
 //! VERIFICATION STATUS: not compiled. The task API
 //! (`esp_idf_svc::hal::task::{create, current, notify, wait_notification}`,
@@ -127,7 +140,7 @@ const JOB_PROBE: u32 = 3;
 /// gets the single-core path and correct output instead of a silent overrun.
 pub const MAX_ATTN_SEQ: usize = 512;
 
-/// Owns the staged int8 head tables, the dual-core job hand-off state, and
+/// Owns the staged packed-int4 head tables, the dual-core job hand-off state, and
 /// both task handles. Always accessed through `&Head` (interior
 /// mutability for the parts genuinely written after construction) --
 /// there is exactly one instance, leaked for `'static` lifetime by
@@ -273,7 +286,7 @@ pub struct Head {
 impl Head {
     /// Ports the per-row body of `stage_head_int8` plus
     /// `head_rows_range`/`dot_i8`: computes `y[r0..r1]` from the staged
-    /// int8 weights and the shared quantized activation. `y` is a raw
+    /// packed-int4 weights and the shared `i16` quantized activation. `y` is a raw
     /// pointer (not `&mut [f32]`) because both this core and the worker
     /// task call this concurrently on disjoint ranges of the same buffer
     /// -- see the module doc comment.
