@@ -624,6 +624,18 @@ and has not been ported (Phase 5).
 | PSRAM @ 80 MHz | 72 MB/s | 91 MB/s | **1.27x** |
 | PSRAM @ 120 MHz | 81 MB/s | 131 MB/s | **1.62x** |
 
+The probe is behind a Cargo feature and **off by default**:
+
+```
+cargo run --release --features bandwidth-probe
+```
+
+It runs once at boot and still costs 0.3 ms/token — not from executing, but
+from ~50 more lines sitting in `head.rs` and moving the code around it
+(106.6 with it, 106.3 without, reproducible across three runs). A measurement
+tool that taxes every token to do nothing during any of them does not belong
+in the default build, however useful it was on the day.
+
 A second LX7 buys 27% more bandwidth, not 100%. Both cores finished within
 0.1 ms of each other, so this is the bus, not imbalance. Against that ceiling:
 

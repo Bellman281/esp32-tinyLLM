@@ -113,6 +113,7 @@ const JOB_ATTN: u32 = 2;
 /// scales and the shortfall was placement. If they take as long as one core
 /// did, the bus is saturated, attention is memory-bound, and halving the KV
 /// cache's working set is worth building.
+#[cfg(feature = "bandwidth-probe")]
 const JOB_PROBE: u32 = 3;
 
 /// Ceiling on `seq_len` for the split attention path, because each core needs
@@ -255,8 +256,11 @@ pub struct Head {
     // by the inference core immediately after the worker's notify. u32
     // microseconds, not u64 -- a half-buffer pass is ~9 ms, and AtomicU64 is
     // not lock-free on a 32-bit LX7.
+    #[cfg(feature = "bandwidth-probe")]
     pr_ptr: AtomicPtr<u8>,
+    #[cfg(feature = "bandwidth-probe")]
     pr_len: AtomicUsize,
+    #[cfg(feature = "bandwidth-probe")]
     pr_us: AtomicU32,
 }
 
@@ -703,6 +707,7 @@ impl Head {
     /// (~12 us, measured) after this core does. Against a ~9 ms half-pass
     /// that is 0.13%, and both per-core times are returned so an imbalance
     /// large enough to matter is visible rather than folded into the average.
+    #[cfg(feature = "bandwidth-probe")]
     pub fn probe_weight_bandwidth_dual(&self) -> (usize, f64, u32, u32) {
         let n = self.w4.len();
         let half = n / 2;
@@ -786,6 +791,7 @@ extern "C" fn head_worker_main(arg: *mut core::ffi::c_void) {
                     t.matvec_rows_into(x, out, rb);
                 }
             }
+            #[cfg(feature = "bandwidth-probe")]
             JOB_PROBE => {
                 let p = head.pr_ptr.load(Ordering::Relaxed);
                 let n = head.pr_len.load(Ordering::Relaxed);
@@ -950,8 +956,11 @@ pub fn stage_and_spawn(tok_emb: QT<'static>, vocab_n: usize) -> Result<&'static 
         prof_attn_wait_us: Cell::new(0),
         prof_attn_own_us: Cell::new(0),
         prof_attn_calls: Cell::new(0),
+        #[cfg(feature = "bandwidth-probe")]
         pr_ptr: AtomicPtr::new(core::ptr::null_mut()),
+        #[cfg(feature = "bandwidth-probe")]
         pr_len: AtomicUsize::new(0),
+        #[cfg(feature = "bandwidth-probe")]
         pr_us: AtomicU32::new(0),
     }));
 

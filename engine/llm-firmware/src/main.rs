@@ -350,6 +350,8 @@ fn main() {
             bytes as f64 / bw / 1000.0
         );
 
+        #[cfg(feature = "bandwidth-probe")]
+        {
         // The same probe with both cores reading disjoint halves at once.
         //
         // One core reading cannot distinguish a bus that saturates at `bw`
@@ -385,6 +387,7 @@ fn main() {
                  shortfall is memory, the rest placement."
             }
         );
+        }
     }
     println!();
     let _ = std::io::stdout().flush();

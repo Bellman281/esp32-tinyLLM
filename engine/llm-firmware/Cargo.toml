@@ -21,6 +21,28 @@ rust-version = "1.82"
 name = "llm-firmware"
 harness = false # do not use the built-in cargo test harness -> resolve rust-analyzer errors
 
+# Diagnostics that are not free, and so are not on by default.
+#
+# `bandwidth-probe` adds JOB_PROBE: a fourth worker job that streams the staged
+# head weights from both cores at once and reports aggregate throughput, which
+# is what established that this board's PSRAM scales 1.27x with a second core
+# rather than 2x. It runs ONCE at boot, outside the timed loop -- and still
+# costs 0.3 ms/token, reproducibly, across three separate runs (106.6 with it,
+# 106.3 without). Not from executing: from ~50 more lines sitting in head.rs
+# and moving the code around it. See BENCHMARKING.md, "Reproducibility and the
+# layout tax".
+#
+# So it is opt-in. Turn it on when investigating a memory question:
+#
+#     cargo run --release --features bandwidth-probe
+#
+# and leave it off otherwise. A measurement tool that taxes every token to do
+# nothing during any of them does not belong in the default build, however
+# useful it was on the day.
+[features]
+default = []
+bandwidth-probe = []
+
 [profile.release]
 opt-level = 3 # the C reference builds with -O3 (arduino-cli compiler.optimization_flags); "s"
               # (the esp-idf-template default, size-optimized) would leave real tok/s on the
