@@ -231,3 +231,22 @@ attn_rope = 0.14
 attn_core = 28.3
 attn_proj = 2.7
 attn_dual = "qkv proj"
+
+[run.rust-attn-split]
+label   = "Rust, now"
+engine  = "rust"
+date    = "2026-08-20"
+commit  = "perf(attn): split attention heads across both cores (2dc3662)"
+note    = "core 28.3 -> 15.6 and wall 118.5 -> 106.8. Two heads per core, one round trip per layer, sync measured at 0.1 ms/token across 6 calls. A perfect halving would be 14.15 + 0.1 sync = 14.25, so 1.35 ms (9.5%) did not come back. Two candidates and this run cannot separate them: (a) bus contention -- unlike the head, both cores now stream the same KV cache at once, so attention may be partly bandwidth-bound where the head was not; (b) the layout tax -- this binary'"'"'s boot-time PSRAM probe reads 68 MB/s against the previous binary'"'"'s 72 on an identical buffer with identical code, i.e. the memory path measures 5.6% slower before generation starts, and head moved +0.8 ms with head.rs untouched. The distinguishing experiment is to run the bandwidth probe on both cores simultaneously and compare against one; not done."
+input   = 3.9
+attn    = 26.4
+ffn     = 6.2
+ple     = 7.6
+head    = 62.7
+wall_ms = 106.8
+tok_s   = 9.36
+attn_qkv  = 7.9
+attn_rope = 0.15
+attn_core = 15.6
+attn_proj = 2.7
+attn_dual = "qkv proj core"

@@ -13,7 +13,7 @@ that one for the numbers, this one for the plan.
 - Runs on an ESP32-S3-DevKitC (N16R8) and produces **byte-identical output
   to the C firmware** over 400 tokens.
 - Host parity suite green: 30 tests, 28 under `--features int8-activations`.
-- **Faster than C** overall: 118.5 vs 122.0 ms/token wall clock, 8.43 vs 8.20
+- **Faster than C** overall: 106.8 vs 122.0 ms/token wall clock, 9.36 vs 8.20
   tok/s, byte-identical output. Started at 3.21 tok/s and was still 1.53x
   slower than C before the nibble-LUT, KV-layout, head-arithmetic, dual-core
   and argmax work — measured on one board, same `model.bin`. Figures here are
