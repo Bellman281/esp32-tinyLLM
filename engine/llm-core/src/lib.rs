@@ -28,6 +28,4 @@ pub use model::{
 };
 pub use profile::Profile;
 pub use scratch::{sizes as scratch_sizes, Scratch, ScratchSizes};
-pub use tensor::{
-    activation_sum, dot_int4_int8, dot_int8_int8, quantize_activations, Cfg, FVec, LoadError, QT,
-};
+pub use tensor::{activation_sum, dot_int4_int8, quantize_activations, Cfg, FVec, LoadError, QT};

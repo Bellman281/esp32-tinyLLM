@@ -291,3 +291,24 @@ attn_rope = 0.15
 attn_core = 14.7
 attn_proj = 2.5
 attn_dual = "qkv proj core"
+
+[run.rust-head-int8]
+label   = "+ int8 head (reverted)"
+engine  = "rust"
+date    = "2026-08-20"
+commit  = "perf(head): stage int8 again -- REVERTED, see note"
+experimental = 1
+experimental_note = "A negative result, kept because it corrects a claim this file made. Staging the head as unpacked int8 instead of packed int4 -- the C reference's format, and one fewer operation per element -- made the head 62.3 -> 76.9 ms and the token 106.3 -> 121.5. Reverted. Bit-exact throughout: the digest still printed OK, so this is purely a cost."
+note    = "WHY IT WAS TRIED: the head is the only stage above C, and it pays a mask-or-shift per element that C does not. WHY IT LOST: the extra 1.21 MB/token costs 13.3 ms at the measured 91 MB/s, and the switch cost 14.6 -- so the unpack itself is worth at most 1.3 ms across 2.43M elements, i.e. nothing. The bytes dominate the arithmetic completely. WHAT IT CORRECTS: this file previously reasoned that the head is compute-bound because it achieves only 19.6 MB/s against 91 available, and concluded that packing bought a resource it was not short of. Utilization is not insensitivity -- doubling its bytes cost full bandwidth price. WHY THE ORIGINAL int4 CHANGE MEASURED 0.0 ms: it was introduced when the head was 94.8 ms with a single-accumulator dot. That dependency chain stalled the loop, and the stalls absorbed the memory latency. Breaking it into four accumulators did not only speed the arithmetic -- it EXPOSED the memory, which is why a byte reduction worth nothing then is worth 13 ms now."
+input   = 4.0
+attn    = 26.8
+ffn     = 6.2
+ple     = 7.6
+head    = 76.9
+wall_ms = 121.6
+tok_s   = 8.23
+attn_qkv  = 7.9
+attn_rope = 0.15
+attn_core = 16.0
+attn_proj = 2.7
+attn_dual = "qkv proj core"
